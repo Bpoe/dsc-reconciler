@@ -9,11 +9,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
-	"dsc-reconciler/internal/dsc"
+	"github.com/Bpoe/dsc-reconciler/internal/dsc"
 )
 
 type fakeDSC struct {
@@ -153,57 +153,179 @@ func TestCancellationPublishesAndStops(t *testing.T) {
 	}
 }
 
-func TestImmediatePeriodicNonOverlappingPasses(t *testing.T) {
-	dir := t.TempDir()
-	input(t, dir, "a.yaml")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	starts := make(chan struct{}, 4)
-	release := make(chan struct{})
-	var active atomic.Int32
-	var overlap atomic.Bool
-	client := fakeDSC{run: func(ctx context.Context, input dsc.Input) dsc.Result {
-		if active.Add(1) != 1 {
-			overlap.Store(true)
+func TestRunDelayAfterPass(t *testing.T) {
+	for _, duration := range []time.Duration{0, 2 * time.Minute, 12 * time.Minute} {
+		t.Run(duration.String(), func(t *testing.T) {
+			dir := t.TempDir()
+			input(t, dir, "a.yaml")
+			synctest.Test(t, func(t *testing.T) {
+				const interval = 5 * time.Minute
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				starts := make(chan time.Time, 4)
+				finishes := make(chan time.Time, 4)
+				executed := make(chan struct{})
+				published := make(chan struct{})
+				client := fakeDSC{run: func(ctx context.Context, input dsc.Input) dsc.Result {
+					starts <- time.Now()
+					select {
+					case <-executed:
+					case <-ctx.Done():
+					}
+					return dsc.Result{Configuration: filepath.Base(input.Configuration), Outcome: "succeeded"}
+				}}
+				writer := &fakeWriter{write: func(context.Context, dsc.Result) error {
+					select {
+					case <-published:
+					case <-ctx.Done():
+					}
+					finishes <- time.Now()
+					return nil
+				}}
+				done := make(chan struct{})
+				start := time.Now()
+				go func() {
+					New(dir, interval, client, writer, logger()).Run(ctx)
+					close(done)
+				}()
+				synctest.Wait()
+				if len(starts) != 1 || !(<-starts).Equal(start) {
+					t.Fatal("first pass did not start immediately")
+				}
+
+				time.Sleep(duration)
+				synctest.Wait()
+				if len(starts) != 0 {
+					t.Fatal("overlapping execution")
+				}
+				close(executed)
+				synctest.Wait()
+				// Completing DSC alone does not complete a pass: publication must finish too.
+				time.Sleep(3 * time.Second)
+				synctest.Wait()
+				if len(starts) != 0 || len(finishes) != 0 {
+					t.Fatal("pass completed before publication")
+				}
+				close(published)
+				synctest.Wait()
+				if len(finishes) != 1 || len(starts) != 0 {
+					t.Fatal("completed pass triggered an immediate catch-up pass")
+				}
+				finished := <-finishes
+				time.Sleep(interval - time.Nanosecond)
+				synctest.Wait()
+				if len(starts) != 0 {
+					t.Fatal("second pass started before a full post-pass interval")
+				}
+				time.Sleep(time.Nanosecond)
+				synctest.Wait()
+				if len(starts) != 1 {
+					t.Fatal("second pass did not start after the interval")
+				}
+				if got := (<-starts).Sub(finished); got != interval {
+					t.Fatalf("post-pass delay = %s, want %s", got, interval)
+				}
+				cancel()
+				synctest.Wait()
+				select {
+				case <-done:
+				default:
+					t.Fatal("loop did not stop")
+				}
+			})
+		})
+	}
+}
+
+func TestRunCancellationAfterPass(t *testing.T) {
+	for _, when := range []string{"during wait", "at pass completion"} {
+		t.Run(when, func(t *testing.T) {
+			dir := t.TempDir()
+			input(t, dir, "a.yaml")
+			synctest.Test(t, func(t *testing.T) {
+				const interval = 5 * time.Minute
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				calls := make(chan struct{}, 4)
+				client := fakeDSC{run: func(_ context.Context, input dsc.Input) dsc.Result {
+					calls <- struct{}{}
+					return dsc.Result{Configuration: filepath.Base(input.Configuration), Outcome: "succeeded"}
+				}}
+				writer := &fakeWriter{write: func(context.Context, dsc.Result) error {
+					if when == "at pass completion" {
+						cancel()
+					}
+					return nil
+				}}
+				done := make(chan struct{})
+				go func() {
+					New(dir, interval, client, writer, logger()).Run(ctx)
+					close(done)
+				}()
+				synctest.Wait()
+				if len(calls) != 1 || len(writer.results) != 1 {
+					t.Fatal("initial pass did not complete")
+				}
+				if when == "during wait" {
+					select {
+					case <-done:
+						t.Fatal("loop exited before cancellation")
+					default:
+					}
+					time.Sleep(time.Minute)
+				}
+				canceledAt := time.Now()
+				cancel()
+				synctest.Wait()
+				select {
+				case <-done:
+				default:
+					t.Fatal("cancellation did not promptly stop the loop")
+				}
+				if !time.Now().Equal(canceledAt) {
+					t.Fatal("cancellation waited for the interval")
+				}
+				time.Sleep(2 * interval)
+				synctest.Wait()
+				if len(calls) != 1 {
+					t.Fatal("another pass started after cancellation")
+				}
+			})
+		})
+	}
+}
+
+func TestRunRetriesPassFailureAfterInterval(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "initially missing")
+	synctest.Test(t, func(t *testing.T) {
+		const interval = 5 * time.Minute
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		calls := make(chan struct{}, 4)
+		client := fakeDSC{run: func(_ context.Context, input dsc.Input) dsc.Result {
+			calls <- struct{}{}
+			return dsc.Result{Configuration: filepath.Base(input.Configuration), Outcome: "succeeded"}
+		}}
+		go New(dir, interval, client, &fakeWriter{}, logger()).Run(ctx)
+		synctest.Wait()
+		if len(calls) != 0 {
+			t.Fatal("executed a document in an unreadable directory")
 		}
-		defer active.Add(-1)
-		starts <- struct{}{}
-		select {
-		case <-release:
-		case <-ctx.Done():
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
 		}
-		return dsc.Result{Configuration: filepath.Base(input.Configuration), Outcome: "succeeded"}
-	}}
-	done := make(chan struct{})
-	go func() {
-		New(dir, 5*time.Millisecond, client, &fakeWriter{}, logger()).Run(ctx)
-		close(done)
-	}()
-	receive := func() {
-		t.Helper()
-		select {
-		case <-starts:
-		case <-time.After(3 * time.Second):
-			t.Fatal("pass did not start")
+		input(t, dir, "a.yaml")
+		time.Sleep(interval - time.Nanosecond)
+		synctest.Wait()
+		if len(calls) != 0 {
+			t.Fatal("retried before the interval")
 		}
-	}
-	receive()
-	select {
-	case <-starts:
-		t.Fatal("overlapping pass")
-	case <-time.After(25 * time.Millisecond):
-	}
-	release <- struct{}{}
-	receive()
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("loop did not stop")
-	}
-	if active.Load() != 0 || overlap.Load() {
-		t.Fatal("active/overlapping execution")
-	}
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		if len(calls) != 1 {
+			t.Fatal("pass failure prevented the scheduled retry")
+		}
+	})
 }
 
 func TestScanFailureAndCanceledStartup(t *testing.T) {

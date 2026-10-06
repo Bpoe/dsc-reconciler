@@ -11,7 +11,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"dsc-reconciler/internal/dsc"
+	"github.com/Bpoe/dsc-reconciler/internal/dsc"
 )
 
 // Writer owns one results directory. Only one daemon may own a directory pair.

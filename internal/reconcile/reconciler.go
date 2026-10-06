@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"dsc-reconciler/internal/dsc"
+	"github.com/Bpoe/dsc-reconciler/internal/dsc"
 )
 
 // DSC applies an opaque configuration document and optional parameter file.
@@ -36,10 +36,8 @@ func New(dir string, interval time.Duration, client DSC, writer ResultWriter, lo
 	return &Reconciler{dir: dir, interval: interval, dsc: client, writer: writer, log: logger}
 }
 
-// Run reconciles immediately, then on ticks until cancellation. Pass failures are retried.
+// Run reconciles immediately, then waits the interval after each pass, including failures.
 func (r *Reconciler) Run(ctx context.Context) {
-	ticker := time.NewTicker(r.interval)
-	defer ticker.Stop()
 	for {
 		if ctx.Err() != nil {
 			return
@@ -47,10 +45,12 @@ func (r *Reconciler) Run(ctx context.Context) {
 		if err := r.Pass(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			r.log.Error("reconciliation pass failed", "config_path", r.dir, "error", err)
 		}
+		timer := time.NewTimer(r.interval)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
 		}
 	}
 }

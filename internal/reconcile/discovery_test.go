@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"dsc-reconciler/internal/dsc"
+	"github.com/Bpoe/dsc-reconciler/internal/dsc"
 )
 
 func TestParameterAssociation(t *testing.T) {

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"dsc-reconciler/internal/dsc"
+	"github.com/Bpoe/dsc-reconciler/internal/dsc"
 )
 
 func newTestWriter(t *testing.T) *Writer {

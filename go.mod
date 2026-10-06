@@ -1,4 +1,4 @@
-module dsc-reconciler
+module github.com/Bpoe/dsc-reconciler
 
 go 1.27.0
 

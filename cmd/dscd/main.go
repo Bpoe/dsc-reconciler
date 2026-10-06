@@ -11,10 +11,10 @@ import (
 	"os"
 	"time"
 
-	"dsc-reconciler/internal/config"
-	"dsc-reconciler/internal/dsc"
-	"dsc-reconciler/internal/reconcile"
-	"dsc-reconciler/internal/results"
+	"github.com/Bpoe/dsc-reconciler/internal/config"
+	"github.com/Bpoe/dsc-reconciler/internal/dsc"
+	"github.com/Bpoe/dsc-reconciler/internal/reconcile"
+	"github.com/Bpoe/dsc-reconciler/internal/results"
 )
 
 const shutdownTimeout = 30 * time.Second

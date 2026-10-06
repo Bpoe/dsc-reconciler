@@ -8,7 +8,7 @@ import (
 	"io"
 	"os"
 
-	"dsc-reconciler/internal/dsc"
+	"github.com/Bpoe/dsc-reconciler/internal/dsc"
 )
 
 func inputHash(ctx context.Context, input dsc.Input) (string, error) {

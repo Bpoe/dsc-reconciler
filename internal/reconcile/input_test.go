@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"dsc-reconciler/internal/dsc"
-	"dsc-reconciler/internal/results"
+	"github.com/Bpoe/dsc-reconciler/internal/dsc"
+	"github.com/Bpoe/dsc-reconciler/internal/results"
 )
 
 func TestFileHashReadsEntireInput(t *testing.T) {

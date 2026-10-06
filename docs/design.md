@@ -71,7 +71,7 @@ The initial configuration uses the standard `flag` package:
 | --- | --- | --- | --- |
 | `-config-dir` | `ConfigDir` | Linux: `/etc/dsc/config.d`; Windows: `%ProgramData%\dsc\config.d` | Directory containing DSC documents. |
 | `-results-dir` | `ResultsDir` | Linux: `/var/lib/dsc/results.d`; Windows: `%ProgramData%\dsc\results.d` | Directory containing latest execution results. |
-| `-interval` | `Interval` | `5m` | Periodic reconciliation interval; must be positive. |
+| `-interval` | `Interval` | `5m` | Delay after each completed reconciliation pass; must be positive. |
 | `-dsc-path` | `DSCPath` | `dsc` | Executable path or name to resolve at startup using PATH (and PATHEXT on Windows). |
 | `-execution-timeout` | `ExecutionTimeout` | `15m` | Positive maximum duration per document, including process/output handling. |
 
@@ -139,17 +139,20 @@ or became unreadable, record an input failure and continue. This is operational
 validation, not a security boundary against a malicious local writer. Trusted
 producers must publish using temporary files and replacement, not in-place edits.
 
-Use a ticker for subsequent passes. A slow pass may be followed by a pass when
-a tick is pending; there is no promise of an additional full interval after its
-completion. Missed periods do not form a durable work queue. There is exactly
-one active pass and one DSC invocation at a time within a daemon instance.
+Reconcile immediately on startup. After each pass completes, including all result
+publication attempts, wait the full configured interval before starting the next
+pass. Pass-level failures use the same delay before retrying. Slow passes never
+cause catch-up runs: a 12-minute pass with a five-minute interval starts its next
+pass 17 minutes after the previous start. There is exactly one active pass and
+one DSC invocation at a time within a daemon instance. Cancellation interrupts
+the wait and prevents further passes.
 
 ```text
 validate startup
 run one pass immediately
 until canceled:
-    wait for ticker or cancellation
-    on tick: run one pass
+    wait the full interval after pass completion, or stop on cancellation
+    if not canceled: run one pass
 ```
 
 For every attempted document, obtain an execution result, then attempt to

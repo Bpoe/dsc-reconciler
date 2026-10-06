@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"dsc-reconciler/internal/dsc"
+	"github.com/Bpoe/dsc-reconciler/internal/dsc"
 )
 
 type candidate struct {

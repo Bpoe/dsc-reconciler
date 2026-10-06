@@ -126,7 +126,7 @@ exceeding the 30-second shutdown bound exits nonzero.
 | `-config-dir` | Linux `/etc/dsc/config.d`; Windows `%ProgramData%\dsc\config.d` | Existing readable input directory. |
 | `-results-dir` | Linux `/var/lib/dsc/results.d`; Windows `%ProgramData%\dsc\results.d` | Results directory, privately created if absent. |
 | `-dsc-path` | `dsc` | Executable path or name, resolved once at startup through PATH/PATHEXT. |
-| `-interval` | `5m` | Positive ticker interval, not a delay after pass completion. |
+| `-interval` | `5m` | Positive delay after each completed reconciliation pass. |
 | `-execution-timeout` | `15m` | Positive per-document timeout. Later documents continue after a timeout. |
 
 Use `-help` for flags. There are no subcommands, daemon configuration files or
@@ -140,8 +140,9 @@ Discovery is nonrecursive. Ordinary files ending in case-sensitive `.yaml` or
 directories, symlinks, `.yml` files, uppercase extensions and temporary suffixes
 such as `.yaml.tmp` are ignored. Go string ordering puts
 `10-a.yaml` before `20-b.yaml`. Each pass rediscovers documents; unchanged files
-are reapplied because machine state may drift. A slow pass never overlaps another
-pass; a pending tick may cause the next pass immediately.
+are reapplied because machine state may drift. Reconcile immediately on startup,
+then wait the full interval after each completed pass before starting the next.
+Passes never overlap, and slow passes do not cause catch-up runs.
 
 `*.parameters.yaml` and `*.parameters.json` are reserved sidecars, never standalone
 configurations. Match by the configuration filename without its final extension:

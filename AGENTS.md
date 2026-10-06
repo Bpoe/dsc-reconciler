@@ -160,7 +160,8 @@ Prioritize observable behavior:
 - Discovery, filtering, empty directories, and deterministic ordering: files
   created as `20-b.yaml` and `10-a.yaml` execute as `10-a.yaml`, `20-b.yaml`.
 - Continued processing after a document failure and publication of failure results.
-- Cancellation, clean shutdown, and no overlapping passes.
+- Immediate first reconciliation, a full interval after each completed pass,
+  no catch-up or overlapping passes, and prompt cancellation during the wait.
 - DSC argument passing, separate stdout/stderr, and execution/output errors.
 - Valid result JSON, filename mapping, complete replacement, publication failures,
   and temporary-file cleanup.
