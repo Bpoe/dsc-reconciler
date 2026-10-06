@@ -1,0 +1,19 @@
+[Unit]
+Description=Local DSC reconciliation daemon
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/bin/dscd -config-dir /etc/dsc/config.d -results-dir /var/lib/dsc/results.d -dsc-path /usr/local/bin/dsc -interval 30s -execution-timeout 15m
+Restart=on-failure
+RestartSec=5s
+KillMode=control-group
+TimeoutStopSec=40s
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
