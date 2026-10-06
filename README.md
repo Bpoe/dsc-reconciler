@@ -1,12 +1,18 @@
 # dsc-reconciler
 
-`dscd` is a small local DSC daemon for **Linux and Windows**. It applies eligible
-documents immediately at startup and on each subsequent tick, one at a time in
-filename order, and writes the latest attempt for each document as JSON. Failed
-documents and publication failures do not prevent attempts on other documents.
+`dsc-reconciler` is a lightweight local reconciliation daemon for DSC. The `dscd`
+process continuously discovers DSC configuration documents in a configured directory,
+evaluates them against the local machine, applies any required changes, and records
+the results.
+
+The project is intentionally simple. `dscd` does not own configuration authoring,
+composition, or parameter processing; it treats DSC configuration and parameter files
+as inputs and delegates their interpretation and execution to DSC. This makes it
+useful both as a standalone local desired-state reconciler and as a building block
+for higher-level configuration control planes.
 
 There is no server, remote configuration store, watcher, document parser or
-resource model. DSC owns validation, testing and applying resources. See the
+resource model. DSC owns testing and applying configurations. See the
 [design and result contract](docs/design.md) and [contributor guidance](AGENTS.md).
 
 ## Prerequisites and compatibility
