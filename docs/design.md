@@ -71,12 +71,12 @@ The initial configuration uses the standard `flag` package:
 | --- | --- | --- | --- |
 | `-config-dir` | `ConfigDir` | Linux: `/etc/dsc/config.d`; Windows: `%ProgramData%\dsc\config.d` | Directory containing DSC documents. |
 | `-results-dir` | `ResultsDir` | Linux: `/var/lib/dsc/results.d`; Windows: `%ProgramData%\dsc\results.d` | Directory containing latest execution results. |
-| `-interval` | `Interval` | `30s` | Periodic reconciliation interval; must be positive. |
+| `-interval` | `Interval` | `5m` | Periodic reconciliation interval; must be positive. |
 | `-dsc-path` | `DSCPath` | `dsc` | Executable path or name to resolve at startup using PATH (and PATHEXT on Windows). |
 | `-execution-timeout` | `ExecutionTimeout` | `15m` | Positive maximum duration per document, including process/output handling. |
 
 ```sh
-dscd -config-dir /etc/dsc/config.d -results-dir /var/lib/dsc/results.d -interval 30s -dsc-path dsc
+dscd -config-dir /etc/dsc/config.d -results-dir /var/lib/dsc/results.d -interval 5m -dsc-path dsc
 ```
 
 There is no daemon config file, environment-variable override layer, or subcommand

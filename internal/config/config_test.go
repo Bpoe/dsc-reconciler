@@ -11,7 +11,7 @@ import (
 
 func TestParse(t *testing.T) {
 	o, err := Parse(nil, io.Discard)
-	if err != nil || o.Interval != 30*time.Second || o.ExecutionTimeout != 15*time.Minute || o.DSCPath != "dsc" {
+	if err != nil || o.Interval != 5*time.Minute || o.ExecutionTimeout != 15*time.Minute || o.DSCPath != "dsc" {
 		t.Fatalf("defaults: %+v, %v", o, err)
 	}
 	input, output := defaultDirectories()
@@ -26,6 +26,13 @@ func TestParse(t *testing.T) {
 		if _, err := Parse(args, io.Discard); err == nil {
 			t.Errorf("accepted %v", args)
 		}
+	}
+}
+
+func TestIntervalOverride(t *testing.T) {
+	o, err := Parse([]string{"-interval", "30s"}, io.Discard)
+	if err != nil || o.Interval != 30*time.Second {
+		t.Fatalf("explicit interval: %+v, %v", o, err)
 	}
 }
 

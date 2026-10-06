@@ -31,7 +31,7 @@ func Parse(args []string, output io.Writer) (Options, error) {
 	f.StringVar(&o.ConfigDir, "config-dir", input, "directory of DSC documents")
 	f.StringVar(&o.ResultsDir, "results-dir", results, "directory for latest results")
 	f.StringVar(&o.DSCPath, "dsc-path", "dsc", "DSC executable name or path")
-	f.DurationVar(&o.Interval, "interval", 30*time.Second, "reconciliation interval (positive)")
+	f.DurationVar(&o.Interval, "interval", 5*time.Minute, "reconciliation interval (positive)")
 	f.DurationVar(&o.ExecutionTimeout, "execution-timeout", 15*time.Minute, "maximum duration per document (positive)")
 	if err := f.Parse(args); err != nil {
 		return o, err

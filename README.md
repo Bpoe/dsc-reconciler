@@ -103,7 +103,7 @@ Linux:
 ```sh
 mkdir -p ./local-config
 ./bin/dscd -config-dir ./local-config -results-dir ./local-results \
-  -dsc-path /absolute/path/to/dsc -interval 30s -execution-timeout 15m
+  -dsc-path /absolute/path/to/dsc -interval 5m -execution-timeout 15m
 ```
 
 Windows:
@@ -111,7 +111,7 @@ Windows:
 ```powershell
 New-Item -ItemType Directory -Force .\local-config | Out-Null
 .\bin\dscd.exe -config-dir .\local-config -results-dir .\local-results `
-    -dsc-path 'C:\Program Files\DSC\dsc.exe' -interval 30s -execution-timeout 15m
+    -dsc-path 'C:\Program Files\DSC\dsc.exe' -interval 5m -execution-timeout 15m
 ```
 
 Adjust the executable path to your installation. Paths with spaces are supported.
@@ -126,7 +126,7 @@ exceeding the 30-second shutdown bound exits nonzero.
 | `-config-dir` | Linux `/etc/dsc/config.d`; Windows `%ProgramData%\dsc\config.d` | Existing readable input directory. |
 | `-results-dir` | Linux `/var/lib/dsc/results.d`; Windows `%ProgramData%\dsc\results.d` | Results directory, privately created if absent. |
 | `-dsc-path` | `dsc` | Executable path or name, resolved once at startup through PATH/PATHEXT. |
-| `-interval` | `30s` | Positive ticker interval, not a delay after pass completion. |
+| `-interval` | `5m` | Positive ticker interval, not a delay after pass completion. |
 | `-execution-timeout` | `15m` | Positive per-document timeout. Later documents continue after a timeout. |
 
 Use `-help` for flags. There are no subcommands, daemon configuration files or

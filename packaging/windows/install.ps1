@@ -40,7 +40,7 @@ function Quote-Path([string] $Value) {
     # Double trailing backslashes so they do not escape the closing argument quote.
     return '"' + ($Value -replace '(\\+)$', '$1$1') + '"'
 }
-$command = '{0} -config-dir {1} -results-dir {2} -dsc-path {3} -interval 30s -execution-timeout 15m' -f `
+$command = '{0} -config-dir {1} -results-dir {2} -dsc-path {3} -interval 5m -execution-timeout 15m' -f `
     (Quote-Path $BinaryPath), (Quote-Path $ConfigDir), (Quote-Path $ResultsDir), (Quote-Path $DSCPath)
 New-Service -Name dscd -DisplayName 'DSC reconciliation daemon' -BinaryPathName $command -StartupType Automatic `
     -Description 'Periodically applies local DSC documents and publishes their latest results.' | Out-Null
