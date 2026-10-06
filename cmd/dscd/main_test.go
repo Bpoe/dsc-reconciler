@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,16 +20,31 @@ import (
 
 func TestMain(m *testing.M) {
 	if os.Getenv("DSCD_TEST_RESULT_PROCESS") == "1" {
-		if len(os.Args) != 7 || os.Args[1] != "config" || os.Args[2] != "set" {
+		args := os.Args[1:]
+		if len(args) == 0 || args[0] != "config" {
 			os.Exit(2)
 		}
-		document, err := os.ReadFile(os.Args[4])
+		args = args[1:]
+		parameters := ""
+		if len(args) >= 2 && args[0] == "--parameters-file" {
+			parameters = args[1]
+			args = args[2:]
+		}
+		if len(args) != 5 || !slices.Equal(args[:2], []string{"set", "--file"}) ||
+			!slices.Equal(args[3:], []string{"--output-format", "json"}) {
+			os.Exit(2)
+		}
+		document, err := os.ReadFile(args[2])
 		if err != nil {
 			os.Exit(3)
 		}
 		if string(document) == "invalid output" {
 			fmt.Print("invalid JSON")
 		} else {
+			data, err := os.ReadFile(parameters)
+			if err != nil || filepath.Base(parameters) != "20-success.parameters.yaml" || string(data) != "private-sidecar-value" {
+				os.Exit(4)
+			}
 			fmt.Print(`{"metadata":{},"results":[],"messages":[],"hadErrors":false}`)
 		}
 		os.Exit(0)
@@ -46,7 +63,10 @@ func TestEndToEndPublicationAndContinuation(t *testing.T) {
 	if err := os.Mkdir(input, 0700); err != nil {
 		t.Fatal(err)
 	}
-	for name, data := range map[string]string{"10-failure.yaml": "invalid output", "20-success.json": "opaque input"} {
+	for name, data := range map[string]string{
+		"10-failure.yaml": "invalid output", "20-success.json": "opaque input",
+		"20-success.parameters.yaml": "private-sidecar-value",
+	} {
 		if err := os.WriteFile(filepath.Join(input, name), []byte(data), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -102,6 +122,16 @@ func TestEndToEndPublicationAndContinuation(t *testing.T) {
 		if err := json.Unmarshal(data, &result); err != nil || result.Configuration != name || result.Outcome != outcome {
 			t.Fatalf("unexpected result %s: %s (%v)", name, data, err)
 		}
+		if result.InputHash == "" || strings.Contains(string(data), "private-sidecar-value") {
+			t.Fatalf("missing input hash or leaked parameters in %s", data)
+		}
+		if name == "20-success.json" && result.Parameters != "20-success.parameters.yaml" {
+			t.Fatalf("missing parameter identity: %+v", result)
+		}
+	}
+	files, err := os.ReadDir(output)
+	if err != nil || len(files) != 2 {
+		t.Fatalf("unexpected result files (sidecar was executed?): %v (%v)", files, err)
 	}
 }
 

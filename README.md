@@ -29,7 +29,8 @@ Install DSC from the [official release](https://github.com/PowerShell/DSC/releas
 The invocation and envelope were verified against the official version-tagged
 [CLI](https://github.com/PowerShell/DSC/blob/v3.1.0/docs/reference/cli/config/set.md)
 and [result](https://github.com/PowerShell/DSC/blob/v3.1.0/docs/reference/schemas/outputs/config/set.md)
-references. No real DSC execution was used to validate this initial implementation.
+references. An opt-in Echo smoke test also exercised DSC `3.2.0-preview.14`;
+this does not certify all resources or that release.
 Other releases may work if they preserve that contract, but are not certified.
 The daemon does not check or pin the installed version at runtime.
 
@@ -72,10 +73,25 @@ if ($LASTEXITCODE -ne 0 -or $unformatted.Count) { throw 'Formatting check failed
 ```
 
 Normal tests use temporary files, fakes and controlled helper executables, not
-DSC. They do not install services or change machine configuration. CI runs native
-build/test/vet/format/race checks on both OSes and service smoke tests on disposable
-runners. `packaging\windows\test-service.ps1` is a separate, **administrator-only,
+DSC. They do not install services or change machine configuration.
+[CI](.github/workflows/ci.yaml) runs native build/test/vet/format/race checks on
+both OSes for pushes and pull requests. Service smoke tests run separately on
+disposable runners through the manual
+[service-integration workflow](.github/workflows/service-integration.yaml):
+in GitHub, select **Actions > service-integration > Run workflow**.
+`packaging\windows\test-service.ps1` is a separate, **administrator-only,
 opt-in** SCM integration check; never run it on a production machine.
+
+To explicitly run the real DSC parameter-file tests, install `Microsoft.DSC.Debug/Echo`
+and set `DSCD_TEST_DSC_PATH` for that test process:
+
+```powershell
+$env:DSCD_TEST_DSC_PATH = 'C:\path\to\dsc.exe'
+go test ./internal/dsc -run TestRealDSCParameterFiles -count=1 -v
+Remove-Item Env:\DSCD_TEST_DSC_PATH
+```
+
+Without that variable, normal tests skip real DSC execution.
 
 ## Foreground execution
 
@@ -119,16 +135,40 @@ standard data root, with `C:\ProgramData` as fallback. Input and output director
 must be separate and non-nested; aliases through existing symlinks are resolved.
 Only one daemon instance may own a directory pair; no multi-process lock is provided.
 
-Discovery is nonrecursive. Regular files ending in case-sensitive `.yaml`, `.yml`
-or `.json` are eligible. Hidden names, directories, symlinks, uppercase extensions
-and temporary suffixes such as `.yaml.tmp` are ignored. Go string ordering puts
+Discovery is nonrecursive. Ordinary files ending in case-sensitive `.yaml` or
+`.json` are eligible; `.dsc.` is not required in filenames. Hidden names,
+directories, symlinks, `.yml` files, uppercase extensions and temporary suffixes
+such as `.yaml.tmp` are ignored. Go string ordering puts
 `10-a.yaml` before `20-b.yaml`. Each pass rediscovers documents; unchanged files
 are reapplied because machine state may drift. A slow pass never overlaps another
 pass; a pending tick may cause the next pass immediately.
 
+`*.parameters.yaml` and `*.parameters.json` are reserved sidecars, never standalone
+configurations. Match by the configuration filename without its final extension:
+
+```text
+base.yaml       + base.parameters.yaml
+security.json   (no sidecar)
+web.yaml        + web.parameters.json
+```
+
+Names match exactly, case-sensitively; formats may differ. Both parameter formats
+for one basename are an error, not a precedence choice. `web.yaml` and `web.json`
+together are also invalid, with or without a sidecar. Affected configurations
+receive failed input results and unrelated configurations continue. Orphan
+sidecars are ignored. Missing/unreadable or nonregular selected sidecars fail
+rather than silently falling back to parameter defaults.
+
+DSC owns parsing, validation, defaults, substitution and secure values.
+`dscd` does not inspect or merge either file. It passes the sidecar using
+`dsc config --parameters-file <sidecar> set --file <configuration> --output-format json`.
+As before, DSC's `set` operation handles testing and applying changes itself.
+
 Producers must be trusted and publish complete documents by temporary-file
-replacement, not in-place editing. The daemon rechecks files but does not bind
-execution to a content hash or protect against malicious path replacement.
+replacement, not in-place editing. The daemon rechecks and hashes both files
+before execution, but the observed hash is not an immutable snapshot: DSC may
+read newer bytes if paths change afterward. There is no protection against
+malicious path replacement.
 Keep executable/resource directories and input/output parents non-writable by
 untrusted users. Service working directories and environments differ from a
 console; install resources for the service identity and do not rely on a user's
@@ -141,7 +181,11 @@ profile, PATH or current directory.
 before executing the document. Removing or renaming an input does not remove old
 results or undo machine changes.
 
-Every published result has all ten fields below, including explicit nulls:
+Every published result retains the ten fields below, including explicit nulls.
+Two additive fields are included when available: `parameters` is the sidecar
+basename, and `inputHash` is the combined SHA-256 identity of the observed input
+bytes. Changing only the parameter file changes the identity; an absent and an
+empty sidecar differ. Ambiguous or unreadable inputs have no hash.
 
 ```json
 {
@@ -185,6 +229,9 @@ Result files contain potentially sensitive DSC output. New Linux directories
 are `0700` and files `0600`; Windows protects new directories and each file for
 the daemon identity, SYSTEM and administrators. Existing directory permissions
 are left unchanged. Routine logs contain attempt metadata, not raw DSC output.
+Parameter contents are never copied into daemon metadata or logs. Preserved DSC
+output and stderr may still contain values echoed by DSC/resources; `dscd` does
+not redact them. Keep result access restricted accordingly.
 
 Publication writes, syncs and closes a private temporary file before replacement:
 
@@ -288,9 +335,12 @@ existing files, concurrent readers, private permissions, paths with spaces,
 and the in-memory SCM lifecycle are covered.
 
 Actual service registration and system shutdown were **not** exercised on this
-shared machine. CI includes disposable systemd/SCM smoke checks but has not yet
-run for this new local repository. Real DSC/resource execution, power-loss
-durability and other CPU architectures remain unverified. Linux foreground
+shared machine. The manual service-integration workflow provides disposable
+systemd/SCM smoke checks; its presence does not establish a completed run.
+The opt-in Echo test on Windows with DSC `3.2.0-preview.14` passed for YAML/JSON
+configurations with no sidecar and with either parameter format. Other resources,
+real DSC execution on Linux, power-loss durability and other CPU architectures
+remain unverified. Linux foreground
 cannot contain descendants that deliberately leave its process group; jobs and
 cgroups cannot contain work delegated to already-running external services.
 

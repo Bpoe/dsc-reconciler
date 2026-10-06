@@ -17,10 +17,10 @@ import (
 )
 
 type fakeDSC struct {
-	run func(context.Context, string) dsc.Result
+	run func(context.Context, dsc.Input) dsc.Result
 }
 
-func (f fakeDSC) Execute(ctx context.Context, path string) dsc.Result { return f.run(ctx, path) }
+func (f fakeDSC) Execute(ctx context.Context, input dsc.Input) dsc.Result { return f.run(ctx, input) }
 
 type fakeWriter struct {
 	results []dsc.Result
@@ -53,7 +53,7 @@ func input(t *testing.T, dir, name string) {
 
 func TestDiscoveryAndOrdering(t *testing.T) {
 	dir := t.TempDir()
-	for _, name := range []string{"20-b.yaml", "10-a.yaml", "30-c.json", "40-d.yml", ".hidden.yaml", "a.YAML", "a.yaml.tmp", "notes.txt"} {
+	for _, name := range []string{"20-b.yaml", "10-a.yaml", "30-c.json", "40-d.yml", ".hidden.yaml", "a.YAML", "a.yaml.tmp", "notes.txt", "10-a.parameters.yaml", "orphan.parameters.json"} {
 		input(t, dir, name)
 	}
 	if err := os.Mkdir(filepath.Join(dir, "directory.yaml"), 0700); err != nil {
@@ -63,8 +63,12 @@ func TestDiscoveryAndOrdering(t *testing.T) {
 		t.Logf("symlink filtering not exercised: %v", err)
 	}
 	got, err := discover(dir)
-	want := []string{"10-a.yaml", "20-b.yaml", "30-c.json", "40-d.yml"}
-	if err != nil || !reflect.DeepEqual(got, want) {
+	var names []string
+	for _, item := range got {
+		names = append(names, filepath.Base(item.input.Configuration))
+	}
+	want := []string{"10-a.yaml", "20-b.yaml", "30-c.json"}
+	if err != nil || !reflect.DeepEqual(names, want) {
 		t.Fatalf("discovery = %v, %v", got, err)
 	}
 	empty, err := discover(t.TempDir())
@@ -80,8 +84,8 @@ func TestFailureContinuationAndRediscovery(t *testing.T) {
 	}
 	var calls []string
 	writer := &fakeWriter{write: func(context.Context, dsc.Result) error { return errors.New("disk failure") }}
-	client := fakeDSC{run: func(_ context.Context, path string) dsc.Result {
-		name := filepath.Base(path)
+	client := fakeDSC{run: func(_ context.Context, input dsc.Input) dsc.Result {
+		name := filepath.Base(input.Configuration)
 		calls = append(calls, name)
 		return dsc.Result{Configuration: name, Outcome: "failed", Error: &dsc.Failure{Kind: "exit"}}
 	}}
@@ -110,11 +114,11 @@ func TestInputChangedBeforeExecution(t *testing.T) {
 	input(t, dir, "10-a.yaml")
 	input(t, dir, "20-b.yaml")
 	writer := &fakeWriter{}
-	client := fakeDSC{run: func(_ context.Context, path string) dsc.Result {
+	client := fakeDSC{run: func(_ context.Context, input dsc.Input) dsc.Result {
 		if err := os.Remove(filepath.Join(dir, "20-b.yaml")); err != nil {
 			t.Error(err)
 		}
-		return dsc.Result{Configuration: filepath.Base(path), Outcome: "succeeded"}
+		return dsc.Result{Configuration: filepath.Base(input.Configuration), Outcome: "succeeded"}
 	}}
 	if err := New(dir, time.Second, client, writer, logger()).Pass(context.Background()); err != nil {
 		t.Fatal(err)
@@ -139,9 +143,9 @@ func TestCancellationPublishesAndStops(t *testing.T) {
 		}
 		return nil
 	}}
-	client := fakeDSC{run: func(_ context.Context, path string) dsc.Result {
+	client := fakeDSC{run: func(_ context.Context, input dsc.Input) dsc.Result {
 		cancel()
-		return dsc.Result{Configuration: filepath.Base(path), Outcome: "canceled", Error: &dsc.Failure{Kind: "canceled"}}
+		return dsc.Result{Configuration: filepath.Base(input.Configuration), Outcome: "canceled", Error: &dsc.Failure{Kind: "canceled"}}
 	}}
 	err := New(dir, time.Second, client, writer, logger()).Pass(ctx)
 	if !errors.Is(err, context.Canceled) || len(writer.results) != 1 {
@@ -158,7 +162,7 @@ func TestImmediatePeriodicNonOverlappingPasses(t *testing.T) {
 	release := make(chan struct{})
 	var active atomic.Int32
 	var overlap atomic.Bool
-	client := fakeDSC{run: func(ctx context.Context, path string) dsc.Result {
+	client := fakeDSC{run: func(ctx context.Context, input dsc.Input) dsc.Result {
 		if active.Add(1) != 1 {
 			overlap.Store(true)
 		}
@@ -168,7 +172,7 @@ func TestImmediatePeriodicNonOverlappingPasses(t *testing.T) {
 		case <-release:
 		case <-ctx.Done():
 		}
-		return dsc.Result{Configuration: filepath.Base(path), Outcome: "succeeded"}
+		return dsc.Result{Configuration: filepath.Base(input.Configuration), Outcome: "succeeded"}
 	}}
 	done := make(chan struct{})
 	go func() {
@@ -204,7 +208,7 @@ func TestImmediatePeriodicNonOverlappingPasses(t *testing.T) {
 
 func TestScanFailureAndCanceledStartup(t *testing.T) {
 	writer := &fakeWriter{}
-	client := fakeDSC{run: func(context.Context, string) dsc.Result {
+	client := fakeDSC{run: func(context.Context, dsc.Input) dsc.Result {
 		t.Fatal("unexpected execution")
 		return dsc.Result{}
 	}}

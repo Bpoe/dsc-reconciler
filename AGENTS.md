@@ -88,7 +88,11 @@ writer must not depend on the scheduling loop. The client does not write results
 the writer does not invoke DSC or schedule work.
 
 DSC owns document parsing, validation, resource semantics, and execution. Treat
-configuration documents as opaque inputs. Do not introduce a YAML parser to
+configuration documents and parameter sidecars as opaque inputs. Associate
+`.parameters.yaml` and `.parameters.json` files by basename, reject ambiguous
+basenames, and never reconcile sidecars independently. Hash both inputs without
+parsing them; the hash is observational rather than a snapshot or skip key.
+Do not introduce a YAML parser to
 inspect files DSC can consume. Parsing DSC execution output is a separate,
 necessary boundary responsibility; it does not justify modeling DSC resources.
 
@@ -189,7 +193,9 @@ Format changed Go files with `gofmt -w` before finishing. CI must fail when the
 formatting check lists files; `gofmt -l` alone does not return a failure status for
 unformatted files. Run `go test -race ./...` for concurrency or shared-state
 changes on a supported environment. Keep Makefile targets and CI aligned with
-these commands. Documentation-only edits need consistency and link checks rather
+these commands. Keep normal Go checks in `ci.yaml`; service installation checks
+belong in the manually triggered `service-integration.yaml` workflow on disposable
+runners. Documentation-only edits need consistency and link checks rather
 than unrelated Go tests.
 
 Keep changes focused and preserve unrelated work. Do not add watchers, Cobra,

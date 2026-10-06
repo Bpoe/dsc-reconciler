@@ -28,10 +28,10 @@ func NewClient(path string, timeout time.Duration) *Client {
 	return &Client{path: path, timeout: timeout}
 }
 
-// Execute applies one document. Execution failures are carried in the result.
-func (c *Client) Execute(ctx context.Context, path string) (r Result) {
+// Execute applies one configuration with optional parameters. Failures are carried in the result.
+func (c *Client) Execute(ctx context.Context, input Input) (r Result) {
 	start := time.Now()
-	r = newResult(path, start)
+	r = newResult(input, start)
 	defer func() { r.finish(start) }()
 	deadline, stop := context.WithTimeout(ctx, c.timeout)
 	defer stop()
@@ -39,7 +39,12 @@ func (c *Client) Execute(ctx context.Context, path string) (r Result) {
 	defer cancel()
 	out := limitedBuffer{limit: stdoutLimit, cancel: cancel}
 	diagnostics := limitedBuffer{limit: stderrLimit, cancel: cancel}
-	cmd := exec.CommandContext(execution, c.path, "config", "set", "--file", path, "--output-format", "json")
+	args := []string{"config"}
+	if input.Parameters != "" {
+		args = append(args, "--parameters-file", input.Parameters)
+	}
+	args = append(args, "set", "--file", input.Configuration, "--output-format", "json")
+	cmd := exec.CommandContext(execution, c.path, args...)
 	cmd.Stdout, cmd.Stderr = &out, &diagnostics
 	cmd.WaitDelay = pipeWait
 	cleanup, startErr := startProcess(cmd)

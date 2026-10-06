@@ -112,13 +112,29 @@ and a nonzero exit. Successful startup leads to an immediate reconciliation pass
 
 ## Discovery and reconciliation
 
-Scan direct children of `ConfigDir`. Select regular files with case-sensitive
-extensions `.yaml`, `.yml`, or `.json`. Ignore directories, symlinks, hidden names,
-and files whose final extension is not eligible, such as `example.yaml.tmp`.
-Sort the selected basenames using Go string ordering.
+Scan direct children of `ConfigDir`. Ordinary files with case-sensitive `.yaml`
+or `.json` extensions are configuration documents; `.dsc.` is not required in
+filenames. Ignore directories, symlinks, hidden names, `.yml` files and temporary
+suffixes such as `example.yaml.tmp`. Sort configurations by filename using Go
+string ordering.
+
+The suffixes `*.parameters.yaml` and `*.parameters.json` are reserved for
+parameter sidecars. These files are never independently reconciled, including
+orphan sidecars. For each configuration, remove its final extension and look for
+`<basename>.parameters.yaml` or `<basename>.parameters.json` in the same directory.
+Association uses exact, case-sensitive basenames. Configuration and parameter
+serialization formats may differ: `web.yaml` with `web.parameters.json` is valid.
+
+Duplicate parameter formats are an error; there is no precedence. Duplicate
+configuration basenames (`web.yaml` and `web.json`) are also an error, even
+without a parameter file. Discovery records an input failure for each affected
+configuration, naming the conflicting files; none is executed, and unrelated
+configurations continue. A selected sidecar that is a directory, symlink or
+unreadable file is an input failure, not permission to silently use defaults.
 
 Each pass uses that ordered list and runs one document at a time. Recheck that a
-candidate is still an eligible regular file before execution; if it disappeared
+configuration and selected sidecar are still readable regular files before
+execution; if either disappeared
 or became unreadable, record an input failure and continue. This is operational
 validation, not a security boundary against a malicious local writer. Trusted
 producers must publish using temporary files and replacement, not in-place edits.
@@ -158,11 +174,18 @@ The initial invocation is equivalent to:
 dsc config set --file /absolute/path/to/document.yaml --output-format json
 ```
 
+With a sidecar, use DSC's configuration-level parameter option before `set`:
+
+```sh
+dsc config --parameters-file /absolute/path/to/document.parameters.json set --file /absolute/path/to/document.yaml --output-format json
+```
+
 Pass arguments directly through `os/exec`, without a shell. Use the resolved
 executable and an absolute input path. Capture stdout and stderr separately.
 The compatibility target is **Microsoft DSC 3.1.0**, not Windows PowerShell DSC.
 The invocation and required output fields were verified against the official
-version-tagged [CLI reference](https://github.com/PowerShell/DSC/blob/v3.1.0/docs/reference/cli/config/set.md)
+version-tagged [CLI reference](https://github.com/PowerShell/DSC/blob/v3.1.0/docs/reference/cli/config/set.md),
+[parameter option reference](https://github.com/PowerShell/DSC/blob/v3.1.0/docs/reference/cli/config/index.md#-f---parameters-file)
 and [set-result reference](https://github.com/PowerShell/DSC/blob/v3.1.0/docs/reference/schemas/outputs/config/set.md).
 The daemon does not invoke `--version` or enforce a version-string match at
 startup. Other v3 releases are compatible only if they preserve those arguments,
@@ -172,7 +195,10 @@ Real DSC/resource execution remains an explicit opt-in deployment check.
 
 Use `config set` directly because DSC documents that this operation validates
 the input, tests resources, and applies changes where needed. A separate
-daemon-managed test/set sequence would duplicate that responsibility. Force JSON
+daemon-managed test/set sequence would duplicate that responsibility. The same
+parameters are supplied to DSC's test-and-apply flow. An operator invoking an
+explicit test uses `dsc config --parameters-file <path> test --file <path>`;
+the daemon does not introduce a second process or interpret compliance itself. Force JSON
 output explicitly. See Microsoft's
 [`dsc config set` reference](https://learn.microsoft.com/en-us/powershell/dsc/reference/cli/config/set?view=dsc-3.0).
 
@@ -185,16 +211,28 @@ missing/malformed expected output is a failed attempt. This reports DSC executio
 success, not a permanent compliance guarantee. See the
 [DSC set-result schema](https://learn.microsoft.com/en-us/powershell/dsc/reference/schemas/outputs/config/set?view=dsc-3.0).
 
-The input remains an opaque file supplied to DSC. Do not parse YAML, merge
-documents, reinterpret resource identities, or infer dependencies between
-files. Two documents that manage conflicting state may continually undo each
-other; document authors must resolve that conflict.
+Configuration and parameter contents remain opaque to `dscd`. DSC owns parameter
+parsing, validation, defaults, substitution and secure values. The daemon does
+not parse YAML/JSON inputs, merge documents or parameters, interpolate values,
+reinterpret resource identities, or infer dependencies between configurations.
+Two documents that manage conflicting state may continually undo each other;
+document authors must resolve that conflict.
 
-The path-based boundary does not bind an attempt to an immutable source revision:
-replacement between discovery and DSC opening the file may affect which bytes
-are executed. V1 therefore records source identity and execution times without
-claiming an exact content hash or observed generation. Strong revision
-correlation would require a separately designed snapshot/input contract.
+The reconciliation input identity includes both configuration and parameter
+content when a sidecar is present. Before execution, stream both files into
+SHA-256 hashes without retaining their contents. `inputHash` is `sha256:` followed
+by the lowercase hexadecimal SHA-256 of the concatenation of
+`"dscd-input-v1\0"`, the 32-byte configuration digest, a one-byte sidecar-present
+marker (0 or 1), and, when present, the 32-byte parameter digest. This framing
+distinguishes missing from empty sidecars and keeps file boundaries unambiguous.
+Names are recorded separately; changing either file's bytes changes the hash.
+The hash is observational, not a skip/reconciliation cache key.
+
+The path-based boundary does not bind an attempt to an immutable source revision.
+The hash describes bytes read before execution, not a snapshot: replacement
+between hashing and DSC opening either file may affect the executed bytes, and
+reading a pair is not atomic. Trusted producers must publish complete files.
+Strong revision correlation would require a separate snapshot/input contract.
 
 ## Result contract
 
@@ -220,6 +258,8 @@ The initial envelope uses the following fields:
 | --- | --- | --- |
 | `schemaVersion` | integer | `1` for this envelope contract. |
 | `configuration` | string | Exact source basename, including its extension. |
+| `parameters` | optional string | Selected parameter-sidecar basename; omitted when no unique sidecar was selected. Never contains parameter values. |
+| `inputHash` | optional string | Observed combined SHA-256 identity; omitted when ambiguity, unreadable input or cancellation prevents hashing. |
 | `startedAt` | string | UTC RFC 3339 timestamp with fractional seconds as needed. |
 | `finishedAt` | string | UTC timestamp in the same format. |
 | `durationMs` | integer | Nonnegative elapsed milliseconds, measured with a monotonic clock. |
@@ -259,11 +299,19 @@ For example, this complete envelope represents failure to start DSC:
 }
 ```
 
-All listed fields are present, including explicit nulls. The daemon records its
+The ten original fields are always present, including explicit nulls. The additive
+`parameters` and `inputHash` fields retain schema version 1 and are present when
+available. The daemon records its
 own envelope timestamps and duration; it preserves DSC's metadata separately in
 `dscResult`. Do not synthesize successful output. Invalid stdout produces an
 `output` error; it is not embedded as a fabricated DSC JSON object or dumped into
 routine logs.
+
+Raw parameter contents are never copied into daemon metadata or logs. Existing
+`dscResult` and `stderr` preservation remains unchanged: DSC or a resource may
+echo parameter values in its own output. Protected result files can therefore
+contain those values; this feature does not introduce output redaction or secret
+handling. Resource authors and DSC own secure-value behavior.
 
 Readers must tolerate unknown fields and reject unsupported major envelope
 versions. Additive optional fields may retain version 1; changes to field meaning,
@@ -418,8 +466,10 @@ Tests must not require DSC or mutate the host's desired state. Real-DSC tests ar
 opt-in and must run only in a disposable, explicitly configured environment.
 
 Use the build, test, vet, formatting, and race checks specified in
-[AGENTS.md](../AGENTS.md). CI runs them natively on Linux and Windows, plus
-opt-in service-registration smoke tests only on disposable hosted runners.
+[AGENTS.md](../AGENTS.md). `ci.yaml` runs these checks natively on Linux and Windows
+for pushes and pull requests. Service-registration smoke tests run separately
+through `service-integration.yaml`, triggered manually with `workflow_dispatch`,
+only on disposable hosted runners.
 Normal tests cover the SCM handler using in-memory control/status channels;
 they do not register a service, reboot a machine, invoke real DSC, or change
 host desired state. SCM stop-during-startup, Stop, Shutdown, interrogation,
@@ -428,7 +478,9 @@ startup failure and shutdown bounds are tested.
 Initial local verification exercised Windows amd64 and Linux amd64 under WSL,
 including build/test/vet, race checks, helper-process descendant cleanup,
 bounded output, spaces in paths, and concurrent complete-result visibility.
-This is not native Linux hardware or power-loss validation. Actual service
-installation, host-shutdown delivery and real DSC/resource compatibility must
+An opt-in Windows test against DSC `3.2.0-preview.14` verified Echo defaults and
+parameter overrides for all six configuration/parameter-format combinations.
+This is not native Linux hardware, general DSC resource or power-loss validation.
+Actual service installation, host-shutdown delivery and other DSC/resource compatibility must
 still be verified in a disposable deployment environment; CI definitions are
 not evidence of an already completed CI run.

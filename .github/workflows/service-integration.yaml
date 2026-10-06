@@ -1,14 +1,13 @@
-name: build-and-test
+name: service-integration
 
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  check:
+  service:
     strategy:
       fail-fast: false
       matrix:
@@ -20,33 +19,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Install Windows race compiler
-        id: msys2
-        if: runner.os == 'Windows'
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: UCRT64
-          install: mingw-w64-ucrt-x86_64-gcc
-      - name: Select Windows compiler
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin" >> $env:GITHUB_PATH
-          "CGO_ENABLED=1" >> $env:GITHUB_ENV
-      - name: Build
-        run: go build ./...
-      - name: Test
-        run: go test ./...
-      - name: Vet
-        run: go vet ./...
-      - name: Formatting
-        shell: pwsh
-        run: |
-          $unformatted = @(gofmt -l .)
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ($unformatted.Count -ne 0) { $unformatted; throw 'Run gofmt on the files above.' }
-      - name: Race
-        run: go test -race ./...
       - name: Windows SCM integration (disposable runner only)
         if: runner.os == 'Windows'
         shell: pwsh

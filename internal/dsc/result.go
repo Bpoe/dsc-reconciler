@@ -2,10 +2,18 @@
 package dsc
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"time"
 )
+
+// Input identifies an opaque configuration and its optional parameter file by path.
+type Input struct {
+	Configuration string
+	Parameters    string
+}
 
 // Failure classifies an unsuccessful attempt. Messages are not a stable interface.
 type Failure struct {
@@ -17,6 +25,8 @@ type Failure struct {
 type Result struct {
 	SchemaVersion int             `json:"schemaVersion"`
 	Configuration string          `json:"configuration"`
+	Parameters    string          `json:"parameters,omitempty"`
+	InputHash     string          `json:"inputHash,omitempty"`
 	StartedAt     time.Time       `json:"startedAt"`
 	FinishedAt    time.Time       `json:"finishedAt"`
 	DurationMS    int64           `json:"durationMs"`
@@ -27,8 +37,12 @@ type Result struct {
 	Stderr        string          `json:"stderr"`
 }
 
-func newResult(path string, start time.Time) Result {
-	return Result{SchemaVersion: 1, Configuration: filepath.Base(path), StartedAt: start.UTC(), Outcome: "succeeded"}
+func newResult(input Input, start time.Time) Result {
+	r := Result{SchemaVersion: 1, Configuration: filepath.Base(input.Configuration), StartedAt: start.UTC(), Outcome: "succeeded"}
+	if input.Parameters != "" {
+		r.Parameters = filepath.Base(input.Parameters)
+	}
+	return r
 }
 
 func (r *Result) finish(start time.Time) {
@@ -45,11 +59,15 @@ func (r *Result) fail(kind, message string) {
 	r.Error = &Failure{Kind: kind, Message: message}
 }
 
-// InputFailure records a document that became ineligible or unreadable before execution.
-func InputFailure(path string, err error) Result {
+// InputFailure records an invalid or unreadable input, or cancellation before execution.
+func InputFailure(input Input, err error) Result {
 	start := time.Now()
-	r := newResult(path, start)
-	r.fail("input", err.Error())
+	r := newResult(input, start)
+	kind := "input"
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		kind = "canceled"
+	}
+	r.fail(kind, err.Error())
 	r.finish(start)
 	return r
 }

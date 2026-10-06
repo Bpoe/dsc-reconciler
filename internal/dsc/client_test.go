@@ -34,11 +34,32 @@ func TestMain(m *testing.M) {
 }
 
 func helperDSC() int {
-	if len(os.Args) != 7 || !slices.Equal(os.Args[1:4], []string{"config", "set", "--file"}) ||
-		!slices.Equal(os.Args[5:], []string{"--output-format", "json"}) || !filepath.IsAbs(os.Args[4]) {
+	args := os.Args[1:]
+	if len(args) == 0 || args[0] != "config" {
 		return 91
 	}
-	path := os.Args[4]
+	args = args[1:]
+	parameters := ""
+	if len(args) >= 2 && args[0] == "--parameters-file" {
+		parameters = args[1]
+		args = args[2:]
+	}
+	if parameters != os.Getenv("DSCD_TEST_PARAMETERS") {
+		return 96
+	}
+	if parameters != "" {
+		if !filepath.IsAbs(parameters) {
+			return 97
+		}
+		if _, err := os.ReadFile(parameters); err != nil {
+			return 98
+		}
+	}
+	if len(args) != 5 || !slices.Equal(args[:2], []string{"set", "--file"}) ||
+		!slices.Equal(args[3:], []string{"--output-format", "json"}) || !filepath.IsAbs(args[2]) {
+		return 91
+	}
+	path := args[2]
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return 92
@@ -141,7 +162,7 @@ func TestExecuteClassification(t *testing.T) {
 	} {
 		t.Run(test.mode, func(t *testing.T) {
 			path := writeMode(t, dir, test.mode)
-			result := client.Execute(context.Background(), path)
+			result := client.Execute(context.Background(), Input{Configuration: path})
 			kind := ""
 			if result.Error != nil {
 				kind = result.Error.Kind
@@ -170,16 +191,16 @@ func TestStartAndCancellation(t *testing.T) {
 	client, dir := helperClient(t)
 	path := writeMode(t, dir, "hang")
 	missing := NewClient(filepath.Join(dir, "missing"), time.Second)
-	if r := missing.Execute(context.Background(), path); r.Error.Kind != "start" || r.ExitCode != nil {
+	if r := missing.Execute(context.Background(), Input{Configuration: path}); r.Error.Kind != "start" || r.ExitCode != nil {
 		t.Fatalf("start failure = %+v", r)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if r := client.Execute(ctx, path); r.Outcome != "canceled" || r.Error.Kind != "canceled" || r.ExitCode != nil {
+	if r := client.Execute(ctx, Input{Configuration: path}); r.Outcome != "canceled" || r.Error.Kind != "canceled" || r.ExitCode != nil {
 		t.Fatalf("pre-canceled = %+v", r)
 	}
 	client.timeout = 100 * time.Millisecond
-	if r := client.Execute(context.Background(), path); r.Outcome != "canceled" || r.DurationMS > 5000 {
+	if r := client.Execute(context.Background(), Input{Configuration: path}); r.Outcome != "canceled" || r.DurationMS > 5000 {
 		t.Fatalf("timeout = %+v", r)
 	}
 }
@@ -192,7 +213,7 @@ func TestDescendantCleanup(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			done := make(chan Result, 1)
-			go func() { done <- client.Execute(ctx, path) }()
+			go func() { done <- client.Execute(ctx, Input{Configuration: path}) }()
 			waitFor(t, func() bool { _, err := os.Stat(path + ".ready"); return err == nil })
 			pidBytes, err := os.ReadFile(path + ".pid")
 			if err != nil {
@@ -251,7 +272,7 @@ func TestParseOutput(t *testing.T) {
 	if err != nil || hadErrors || string(payload) != validOutput {
 		t.Fatalf("lost payload: %s, %t, %v", payload, hadErrors, err)
 	}
-	result := InputFailure("a.yaml", fmt.Errorf("unreadable"))
+	result := InputFailure(Input{Configuration: "a.yaml"}, fmt.Errorf("unreadable"))
 	data, err := json.Marshal(result)
 	if err != nil {
 		t.Fatal(err)
@@ -259,6 +280,43 @@ func TestParseOutput(t *testing.T) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil || len(fields) != 10 || string(fields["exitCode"]) != "null" || string(fields["dscResult"]) != "null" {
 		t.Fatalf("envelope fields = %s (%v)", data, err)
+	}
+}
+
+func TestExecuteWithParameters(t *testing.T) {
+	client, dir := helperClient(t)
+	for _, configExt := range []string{".yaml", ".json"} {
+		for _, paramExt := range []string{"", ".yaml", ".json"} {
+			t.Run(configExt+"/parameters"+paramExt, func(t *testing.T) {
+				path := filepath.Join(dir, "config with spaces"+configExt)
+				if err := os.WriteFile(path, []byte("success"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				parameters := ""
+				if paramExt != "" {
+					parameters = filepath.Join(dir, "config with spaces.parameters"+paramExt)
+					if err := os.WriteFile(parameters, []byte("opaque-secret-value"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				t.Setenv("DSCD_TEST_PARAMETERS", parameters)
+				result := client.Execute(context.Background(), Input{Configuration: path, Parameters: parameters})
+				if result.Outcome != "succeeded" || result.ExitCode == nil || *result.ExitCode != 0 {
+					t.Fatalf("parameter invocation failed: %+v", result)
+				}
+				expected := ""
+				if parameters != "" {
+					expected = filepath.Base(parameters)
+				}
+				if result.Parameters != expected {
+					t.Fatalf("parameters = %q, want %q", result.Parameters, expected)
+				}
+				data, err := json.Marshal(result)
+				if err != nil || strings.Contains(string(data), "opaque-secret-value") || strings.Contains(string(data), dir) {
+					t.Fatalf("parameter content or absolute path leaked in result: %s (%v)", data, err)
+				}
+			})
+		}
 	}
 }
 
