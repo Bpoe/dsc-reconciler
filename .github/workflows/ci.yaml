@@ -52,6 +52,8 @@ jobs:
         run: go test -race ./...
       - name: Build and inspect Windows MSI (no installation)
         if: runner.os == 'Windows'
+        env:
+          CGO_ENABLED: '0'
         shell: pwsh
         run: |
           go build -o "$env:RUNNER_TEMP\dscd.exe" ./cmd/dscd
@@ -60,6 +62,8 @@ jobs:
           .\packaging\windows\msi\build.ps1 -Version v0.0.1-rc.1 `
               -BinaryPath "$env:RUNNER_TEMP\dscd.exe" -OutputDirectory "$env:RUNNER_TEMP\dscd-msi" `
               -WixVersion $env:WIX_VERSION -AcceptWixEula
+          .\packaging\windows\msi\inspect.ps1 `
+              -MsiPath "$env:RUNNER_TEMP\dscd-msi\dscd-v0.0.1-rc.1-windows-amd64.msi" -Version v0.0.1-rc.1
       - name: Install Linux packaging tools
         if: runner.os == 'Linux'
         shell: bash

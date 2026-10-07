@@ -25,6 +25,8 @@ jobs:
           cache: true
       - name: Windows MSI integration (disposable runner only)
         if: runner.os == 'Windows'
+        env:
+          CGO_ENABLED: '0'
         shell: pwsh
         run: |
           go build -o bin\dscd.exe .\cmd\dscd
@@ -35,6 +37,10 @@ jobs:
           .\packaging\windows\msi\build.ps1 -Version v0.0.1-rc.2 `
               -BinaryPath .\bin\dscd.exe -OutputDirectory "$env:RUNNER_TEMP\dscd-msi" `
               -WixVersion $env:WIX_VERSION -AcceptWixEula
+          foreach ($version in @('v0.0.1-rc.1', 'v0.0.1-rc.2')) {
+            .\packaging\windows\msi\inspect.ps1 `
+                -MsiPath "$env:RUNNER_TEMP\dscd-msi\dscd-$version-windows-amd64.msi" -Version $version
+          }
           $dscRoot = Join-Path $env:ProgramFiles 'DSC smoke test'
           $archive = Join-Path $env:RUNNER_TEMP 'dsc.zip'
           Invoke-WebRequest -Uri 'https://github.com/PowerShell/DSC/releases/download/v3.3.0/DSC-3.3.0-x86_64-pc-windows-msvc.zip' `
@@ -43,10 +49,18 @@ jobs:
           $dsc = Join-Path $dscRoot 'dsc.exe'
           & $dsc --version
           if ($LASTEXITCODE -ne 0) { throw 'DSC prerequisite does not run.' }
+          # SCM can retain its boot-time PATH. On this disposable hosted image,
+          # expose the fixture in an existing machine PATH directory with spaces,
+          # rather than relying on GITHUB_PATH or a just-edited registry value.
+          $pathDirectory = Join-Path $env:ProgramFiles 'PowerShell\7'
+          $machinePaths = [Environment]::GetEnvironmentVariable('PATH', 'Machine').Split(';') |
+              ForEach-Object { [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') }
+          if ($pathDirectory -notin $machinePaths) { throw 'PowerShell 7 must already be on the image machine PATH.' }
+          New-Item -ItemType SymbolicLink -Path (Join-Path $pathDirectory 'dsc.exe') -Target $dsc | Out-Null
           .\packaging\windows\msi\test-install.ps1 `
               -MsiPath "$env:RUNNER_TEMP\dscd-msi\dscd-v0.0.1-rc.1-windows-amd64.msi" `
               -UpgradeMsiPath "$env:RUNNER_TEMP\dscd-msi\dscd-v0.0.1-rc.2-windows-amd64.msi" `
-              -DSCPath $dsc -Disposable
+              -Disposable
       - name: Preserve Windows MSI logs
         if: always() && runner.os == 'Windows'
         uses: actions/upload-artifact@v4

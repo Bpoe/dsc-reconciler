@@ -19,7 +19,9 @@ resource model. DSC owns testing and applying configurations. See the
 
 - Go **1.27.x** to build; no Go installation is needed to run the compiled binary.
 - Microsoft **DSC 3.3.0 or later** with `dsc server` and the resources your documents
-  require, installed for the account running the daemon. This is modern DSC, not Windows
+  require, installed separately for the account running the daemon. For the Windows
+  MSI service, `dsc.exe` must be on the machine/system PATH visible to LocalSystem.
+  This is modern DSC, not Windows
   PowerShell's `Start-DscConfiguration`.
 - Linux with a local filesystem supporting atomic rename and directory fsync
   (systemd for service installation), or Windows 11 / Windows Server 2022 or newer
@@ -424,10 +426,18 @@ do not request dependency auto-removal if DSC must remain installed.
 First install Microsoft DSC **3.3.0 or later** and the required resources
 machine-wide. The official Windows x64 [DSC release ZIP](https://github.com/PowerShell/DSC/releases/tag/v3.3.0)
 can be extracted by an administrator to `%ProgramFiles%\DSC`, with `dsc.exe`
-directly in that directory. This is the installer's default lookup location,
-not a guaranteed WinGet installation layout. Per-user WinGet/Store installs
-and your interactive PATH are not used. LocalSystem must be able to execute
-DSC and access its resources; protect those files against unprivileged writes.
+directly in that directory. Add that directory to the **machine/system PATH**,
+as described in [Microsoft's installation instructions](https://learn.microsoft.com/en-us/powershell/dsc/install?view=dsc-3.0).
+`dsc.exe` must be discoverable through the PATH visible to **LocalSystem before
+installing or starting dscd**. A per-user WinGet/Store alias or a change to the
+current PowerShell session's PATH is insufficient. LocalSystem must also be able
+to access DSC's resources; protect DSC, resources and PATH directories against
+unprivileged writes.
+
+Windows services may retain an older environment after a system PATH change.
+Reboot before installing/starting dscd if needed to make the new PATH visible to
+the service. A successful `dsc.exe --version` in your interactive shell alone
+does not establish LocalSystem access.
 
 Download the MSI from a release and double-click it, approving elevation,
 or run:
@@ -441,12 +451,18 @@ For unattended installation, use an elevated session:
 
 ```powershell
 msiexec /i .\dscd-<version>-windows-amd64.msi /qn /norestart
-# If DSC is installed elsewhere, supply its absolute executable path:
-msiexec /i .\dscd-<version>-windows-amd64.msi DSC_PATH="C:\Tools\DSC\dsc.exe" /qn /norestart
 ```
 
-The MSI checks that the DSC executable exists; it does not validate its version,
-download it or install resources. Verify `dsc.exe --version` yourself.
+The MSI does not accept, discover, validate or save a DSC executable path, change
+PATH, validate the DSC version, download DSC or install resources. It uses
+`dscd`'s default executable name, `dsc`, resolved at service startup. Verify DSC
+3.3.0+ and service-account access before installation. Missing DSC causes service
+startup to fail; MSI installation then fails through its normal service-start
+handling, without a custom prerequisite message. Inspect the MSI log and the
+Application Event Log for details.
+This failure need not be prompt: an installation without DSC exceeded the smoke
+test's two-minute limit waiting in Windows Installer's service-start action.
+Provision the prerequisite before running the MSI.
 Go, WiX and PowerShell are not required on the target machine.
 
 The MSI installs `%ProgramFiles%\dscd\dscd.exe`, registers **dscd**
@@ -471,7 +487,7 @@ Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='dscd'} -Max
 Stop-Service dscd
 Start-Service dscd
 Restart-Service dscd
-# Upgrade by installing a newer MSI; DSC_PATH is retained unless overridden.
+# Upgrade by installing a newer MSI; DSC must remain on the machine PATH.
 msiexec /i .\dscd-<new-version>-windows-amd64.msi /qn /norestart
 # Uninstall using the installed package, or Windows Installed apps:
 msiexec /x .\dscd-<installed-version>-windows-amd64.msi /qn /norestart
@@ -497,12 +513,13 @@ amd64 and Linux amd64 under WSL. Process cleanup, output limits, replacement of
 existing files, concurrent readers, private permissions, paths with spaces,
 and the in-memory SCM lifecycle are covered.
 
-Native Windows MSI builds, table inspection and the full installation lifecycle
-passed on a disposable runner in [service-integration run 37578288245](https://github.com/Bpoe/dsc-reconciler/actions/runs/37578288245).
-This covered prerequisites, service/ACL/Event Log/recovery checks, explicit DSC
-path overrides, upgrade and payload replacement, downgrade rejection, repair,
-reinstall, uninstall and data retention. Host-shutdown delivery and the complete
-draft-release workflow remain unverified.
+The earlier MSI using explicit DSC paths passed native builds, table inspection
+and lifecycle tests in [service-integration run 37578288245](https://github.com/Bpoe/dsc-reconciler/actions/runs/37578288245).
+That run does not validate the current PATH-based installer. The updated manual
+workflow checks missing-DSC startup failure, PATH-based startup, service/ACL/Event
+Log/recovery behavior, upgrade and payload replacement, downgrade rejection,
+repair, reinstall, uninstall and data retention on a disposable runner.
+Host-shutdown delivery and the complete draft-release workflow remain unverified.
 
 Native DEB/RPM builds, metadata, permissions, prerelease ordering and extracted
 systemd units were verified locally. With Microsoft DSC 3.3.0 installed,

@@ -531,28 +531,30 @@ The directories remain after uninstall, including when empty.
 Install Microsoft DSC 3.3.0 or later separately. Microsoft's
 [Windows installation documentation](https://learn.microsoft.com/en-us/powershell/dsc/install?view=dsc-3.0)
 and [3.3.0 release assets](https://github.com/PowerShell/DSC/releases/tag/v3.3.0)
-provide ZIP distributions as well as other installation methods. The MSI's
-default discovery location, `[ProgramFiles64Folder]DSC\dsc.exe`, is an
-administrator-chosen archive extraction convention, not an assumed WinGet or
-Store path. A public secure MSI property `DSC_PATH` accepts an explicit absolute
-executable path, including spaces. The MSI verifies existence, not the DSC
-version or resource compatibility. Operators must verify version and provision
-LocalSystem access to DSC/resources, with no untrusted write access.
-Interactive user PATH and per-user executable aliases are never consulted.
-The installer neither bundles nor downloads DSC.
-MSI's native directory locator rejects `..` path segments, so a small native
-DLL action derives the canonical parent of an explicit `DSC_PATH` before
-AppSearch. MSI's registry file locator also rejects `.` segments in saved paths;
-the same DLL checks saved selections with the Windows file-attributes API,
-rejecting missing files and directories while retaining the selected path.
-These actions only read properties/filesystem metadata and set MSI properties;
-they perform no machine changes and do not execute DSC. Native file signatures
-and launch conditions validate explicit/default prerequisites. Service, registry,
-directory and ACL operations remain declarative.
+provide ZIP distributions as well as other installation methods. Add the DSC
+directory to the **machine/system PATH visible to LocalSystem** before installing
+or starting dscd. For example, extract the archive to `%ProgramFiles%\DSC` and add
+that directory to the system PATH. This is an operator choice, not an installer
+search location. An interactive user's PATH or per-user WinGet/Store executable
+alias is insufficient. Windows services may retain an older environment after
+PATH changes; reboot before installation/startup if needed. Operators must verify
+DSC 3.3.0+ and LocalSystem access to DSC/resources and protect PATH directories
+and resource files against untrusted writes.
+
+The MSI does not accept a DSC executable path, discover or validate DSC, persist
+its location, or modify PATH. It neither bundles nor downloads DSC. The daemon's
+existing startup validation resolves the default executable name `dsc` through
+the service process's PATH/PATHEXT. If resolution fails, the service fails to
+start and installation fails through native MSI service-start handling; there
+is no custom prerequisite launch condition or tailored MSI discovery error.
+An installation without DSC exceeded the smoke test's two-minute limit in native
+`StartServices`; do not depend on a prompt prerequisite rejection or bounded
+rollback time. Provision and verify the service environment before installation.
+Service, registry, directory and ACL operations remain declarative.
 
 Native service tables own `dscd`, display name `DSC Reconciliation Daemon`,
 automatic startup and LocalSystem identity. The command line supplies only
-`-config-dir`, `-results-dir` and absolute `-dsc-path`; the daemon's five-minute
+`-config-dir` and `-results-dir`; the daemon's default `dsc` name, five-minute
 interval and fifteen-minute execution timeout remain authoritative.
 Reconciliation starts immediately, then waits five minutes after each completed
 pass. Deploying trusted configurations does not require a service restart.
@@ -569,8 +571,8 @@ Application source `dscd` and preserves Event ID 1 / JSON logging.
 
 Major upgrades use a stable UpgradeCode and a new ProductCode per package
 version, stop the service before replacement and restart it afterward.
-The selected DSC path is persisted machine-wide and retained on upgrade unless
-explicitly overridden. Installation is transactional where Windows Installer
+DSC must remain available on the service's machine PATH during upgrades and
+repair. Installation is transactional where Windows Installer
 supports rollback. No migration or alternate legacy layouts are supported.
 Uninstall stops and removes the service, executable and Event Log registration,
 but leaves data directories, documents, results, DSC and reconciled machine
@@ -590,32 +592,41 @@ marked pre-release, even when a stable-form tag is selected.
 
 WiX Toolset 7.0.0 is pinned for builds; no Go source compilation happens inside
 the installer project. The packaging build accepts a previously built executable.
-Building the prerequisite-path DLL requires Visual Studio x64 C++ build tools
-and the Windows SDK, present on the hosted Windows runner. It statically links
-the C runtime; these build tools are not needed on installation targets.
+`build.ps1` maps the release version and invokes `dotnet build`, including its
+normal dependency restore. No native helper, Visual C++ tools, developer shell
+or Windows SDK build dependency is required. The .NET SDK and PowerShell are
+build tools only. CI's MinGW compiler remains solely for Go race checks.
 Go's unversioned PE receives release-version and language-neutral MSI file
 metadata to ensure upgrade replacement; that intentional override's warning
 is also suppressed. All other WiX warnings fail the build.
-Build-time PowerShell scripts validate the version and inspect Windows Installer
+Separate build-time PowerShell scripts validate the version and inspect Windows Installer
 tables for x64 architecture, metadata, paths, payload, service settings,
-recovery, Event Log registration and directory ACLs. PowerShell, Go, .NET and WiX
+recovery, Event Log registration, directory ACLs and the absence of DSC discovery,
+path persistence and PATH modification. Each packaging workflow invokes
+`inspect.ps1` after `build.ps1`. PowerShell, Go, .NET and WiX
 are not target-machine prerequisites. Review WiX's
 [maintenance fee terms](https://docs.firegiant.com/wix/osmf/) before building.
 The build requires `-AcceptWixEula`; approving/running the packaging workflows
 uses that explicit acceptance, so maintainers must review those terms first.
 Ordinary CI and release builds inspect the MSI but never install it.
 The manual `service-integration.yaml` workflow installs it on a disposable
-Windows runner with DSC 3.3.0 at a machine-wide path containing spaces and an
+Windows runner with DSC 3.3.0 visible through the machine PATH and an
 empty input directory, verifies SCM, ACLs and Event Log behavior, cycles the
 service and uninstalls while checking data retention. MSI logs are retained as
 workflow artifacts. Defining those checks is not evidence they have run;
 actual install/upgrade/shutdown behavior must be reported separately.
-The full native MSI build, inspection and lifecycle checks passed in
+The runner exposes the extracted DSC executable through a symlink in an existing
+machine PATH directory containing spaces, avoiding reliance on a newly edited
+PATH reaching the already-running SCM. This is disposable test setup only;
+the MSI does not create that link or change the environment. The test also hides
+the fixture temporarily to verify a direct service restart fails with a DSC
+resolution error, then restores it before continuing the MSI lifecycle checks.
+The previous installer with explicit DSC paths passed native MSI checks in
 [service-integration run 37578288245](https://github.com/Bpoe/dsc-reconciler/actions/runs/37578288245),
-including persisted DSC settings, executable replacement on upgrade, repair,
-reinstall, uninstall and data retention. The same run passed Linux systemd
-integration. Host-shutdown delivery and full draft-release execution were not
-tested by that workflow.
+including executable replacement, repair, reinstall, uninstall and data retention.
+That historical run does not validate the current PATH-based installer. The same
+run passed Linux systemd integration. Host-shutdown delivery and full draft-release
+execution were not tested by that workflow.
 
 The execution timeout defaults to 15 minutes and covers one configuration request,
 including a blocked stdin write or waiting for its response. A timed-out request

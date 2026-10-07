@@ -9,52 +9,8 @@
     <MediaTemplate EmbedCab="yes" />
     <Property Id="ARPCOMMENTS" Value="dscd $(var.ReleaseVersion)" />
     <Property Id="ARPNOMODIFY" Value="1" />
-    <Property Id="DscPathQuote" Value="&quot;" />
-    <Property Id="DSC_PATH" Secure="yes" />
-    <Property Id="EXPLICIT_DSC_PATH" Secure="yes" />
-    <SetProperty Id="EXPLICIT_DSC_PATH" Value="[DSC_PATH]" Before="AppSearch"
-                 Condition="DSC_PATH" />
-    <Property Id="DSC_SEARCH_DIR" Secure="yes" />
-    <Binary Id="SearchDirectoryHelper" SourceFile="$(var.SearchHelperPath)" />
-    <CustomAction Id="PrepareDSCSearchDirectory" BinaryRef="SearchDirectoryHelper"
-                  DllEntry="PrepareDSCSearchDirectory" Execute="immediate" Return="check" />
-    <CustomAction Id="CheckSavedDSCPath" BinaryRef="SearchDirectoryHelper"
-                  DllEntry="CheckSavedDSCPath" Execute="immediate" Return="check" />
-    <InstallUISequence>
-      <Custom Action="PrepareDSCSearchDirectory" Before="AppSearch" Condition="DSC_PATH" />
-      <Custom Action="CheckSavedDSCPath" After="AppSearch" Condition="SAVED_DSC AND NOT DSC_PATH" />
-    </InstallUISequence>
-    <InstallExecuteSequence>
-      <Custom Action="PrepareDSCSearchDirectory" Before="AppSearch" Condition="DSC_PATH" />
-      <Custom Action="CheckSavedDSCPath" After="AppSearch" Condition="SAVED_DSC AND NOT DSC_PATH" />
-    </InstallExecuteSequence>
-
-    <!-- Searches never consult PATH or a user registry hive. The helper derives
-         the canonical parent directory without modifying the system. The launch
-         condition requires an absolute drive path ending in \dsc.exe. -->
-    <Property Id="EXPLICIT_DSC" Secure="yes">
-      <DirectorySearch Id="ExplicitDSCDirectory" Path="[DSC_SEARCH_DIR]" Depth="0">
-        <FileSearch Id="ExplicitDSCFile" Name="dsc.exe" />
-      </DirectorySearch>
-    </Property>
-    <Property Id="SAVED_DSC" Secure="yes">
-      <RegistrySearch Id="SavedDSCPath" Root="HKLM" Key="Software\dsc-reconciler\dscd"
-                      Name="DSC_PATH" Type="raw" Bitness="always64" />
-    </Property>
-    <Property Id="SAVED_DSC_EXISTS" Secure="yes" />
-    <Property Id="DEFAULT_DSC" Secure="yes">
-      <DirectorySearch Id="DefaultDSCDirectory" Path="[ProgramFiles64Folder]DSC" Depth="0">
-        <FileSearch Id="DefaultDSCFile" Name="dsc.exe" />
-      </DirectorySearch>
-    </Property>
-    <SetProperty Id="DSC_PATH" Value="[SAVED_DSC]" After="CheckSavedDSCPath"
-                 Action="RestoreDSCPath" Condition="NOT DSC_PATH AND SAVED_DSC" />
-    <SetProperty Id="DSC_PATH" Value="[DEFAULT_DSC]" After="RestoreDSCPath"
-                 Action="DefaultDSCPath" Condition="NOT DSC_PATH AND NOT SAVED_DSC" />
-    <Launch Condition='REMOVE="ALL" OR (DSC_PATH &gt;&lt; ":\" AND DSC_PATH ~&gt;&gt; "\dsc.exe" AND NOT (DSC_PATH &gt;&lt; DscPathQuote))'
-            Message="Install Microsoft DSC 3.3.0 or later machine-wide first. DSC_PATH must be an absolute path to dsc.exe without embedded quotes. DSC is not included." />
-    <Launch Condition='REMOVE="ALL" OR (EXPLICIT_DSC AND EXPLICIT_DSC_PATH ~= DSC_PATH) OR (SAVED_DSC_EXISTS AND SAVED_DSC ~= DSC_PATH) OR (DEFAULT_DSC AND DEFAULT_DSC ~= DSC_PATH)'
-            Message="Install Microsoft DSC 3.3.0 or later machine-wide first. Extract its Windows x64 archive into Program Files\DSC, or set DSC_PATH to the absolute path of an existing dsc.exe accessible to LocalSystem. DSC is not included." />
+    <!-- Install DSC separately on the machine PATH visible to LocalSystem.
+         dscd resolves its default executable name, dsc, at service startup. -->
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="dscd">
@@ -71,7 +27,7 @@
                           Description="Periodically applies local DSC documents and publishes their latest results."
                           Type="ownProcess" Start="auto" ErrorControl="normal" Account="LocalSystem"
                           Vital="yes"
-                          Arguments='-config-dir "[CONFIGFOLDER]." -results-dir "[RESULTSFOLDER]." -dsc-path "[DSC_PATH]"'>
+                          Arguments='-config-dir "[CONFIGFOLDER]." -results-dir "[RESULTSFOLDER]."'>
             <!-- Util does not expose SERVICE_CONFIG_FAILURE_ACTIONS_FLAG.
                  This native MSI setting retains recovery on handled nonzero
                  SCM exits. MsiConfigureServices' documented reliability caveat
@@ -95,11 +51,6 @@
         <Component Id="License" Guid="{8B637D5E-1A04-42D3-8108-3B0D78D0E814}" Bitness="always64">
           <File Id="LicenseFile" Source="$(sys.SOURCEFILEDIR)..\..\..\LICENSE"
                 Name="LICENSE" KeyPath="yes" />
-        </Component>
-        <Component Id="Settings" Guid="{C64CF70E-6198-4C46-A9B0-05193D3C8CDF}" Bitness="always64">
-          <RegistryKey Root="HKLM" Key="Software\dsc-reconciler\dscd" ForceDeleteOnUninstall="yes">
-            <RegistryValue Name="DSC_PATH" Type="string" Value="[DSC_PATH]" KeyPath="yes" />
-          </RegistryKey>
         </Component>
         <Component Id="EventSource" Guid="{B032B603-FB39-4F5D-92E9-4AF25264C2BF}" Bitness="always64">
           <RegistryKey Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\EventLog\Application\dscd"
@@ -141,7 +92,6 @@
     <Feature Id="Complete" Title="dscd" Level="1">
       <ComponentRef Id="Daemon" />
       <ComponentRef Id="License" />
-      <ComponentRef Id="Settings" />
       <ComponentRef Id="EventSource" />
       <ComponentRef Id="DataDirectory" />
       <ComponentRef Id="ConfigDirectory" />
