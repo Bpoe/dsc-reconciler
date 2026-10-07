@@ -14,12 +14,15 @@
     <Property Id="EXPLICIT_DSC_PATH" Secure="yes" />
     <SetProperty Id="EXPLICIT_DSC_PATH" Value="[DSC_PATH]" Before="AppSearch"
                  Condition="DSC_PATH" />
+    <Property Id="DSC_SEARCH_DIR" Secure="yes" />
+    <SetProperty Id="DSC_SEARCH_DIR" Value="[DSC_PATH]\.." Before="AppSearch"
+                 Condition="DSC_PATH" />
 
     <!-- Searches never consult PATH or a user registry hive. The \.. suffix is
          normalized by Windows to the executable's parent directory. The launch
          condition requires an absolute drive path ending in \dsc.exe. -->
     <Property Id="EXPLICIT_DSC" Secure="yes">
-      <DirectorySearch Id="ExplicitDSCDirectory" Path="[DSC_PATH]\.." Depth="0">
+      <DirectorySearch Id="ExplicitDSCDirectory" Path="[DSC_SEARCH_DIR]" Depth="0">
         <FileSearch Id="ExplicitDSCFile" Name="dsc.exe" />
       </DirectorySearch>
     </Property>
@@ -42,12 +45,9 @@
                  Action="RestoreDSCPath" Condition="NOT DSC_PATH AND SAVED_DSC" />
     <SetProperty Id="DSC_PATH" Value="[DEFAULT_DSC]" After="RestoreDSCPath"
                  Action="DefaultDSCPath" Condition="NOT DSC_PATH AND NOT SAVED_DSC" />
-    <Launch Condition='REMOVE="ALL" OR
-                       (DSC_PATH &gt;&lt; ":\" AND DSC_PATH ~&gt;&gt; "\dsc.exe" AND
-                        NOT (DSC_PATH &gt;&lt; DscPathQuote) AND
-                        ((EXPLICIT_DSC AND EXPLICIT_DSC_PATH ~= DSC_PATH) OR
-                         (SAVED_DSC_EXISTS AND SAVED_DSC ~= DSC_PATH) OR
-                         (DEFAULT_DSC AND DEFAULT_DSC ~= DSC_PATH)))'
+    <Launch Condition='REMOVE="ALL" OR (DSC_PATH &gt;&lt; ":\" AND DSC_PATH ~&gt;&gt; "\dsc.exe" AND NOT (DSC_PATH &gt;&lt; DscPathQuote))'
+            Message="Install Microsoft DSC 3.3.0 or later machine-wide first. DSC_PATH must be an absolute path to dsc.exe without embedded quotes. DSC is not included." />
+    <Launch Condition='REMOVE="ALL" OR (EXPLICIT_DSC AND EXPLICIT_DSC_PATH ~= DSC_PATH) OR (SAVED_DSC_EXISTS AND SAVED_DSC ~= DSC_PATH) OR (DEFAULT_DSC AND DEFAULT_DSC ~= DSC_PATH)'
             Message="Install Microsoft DSC 3.3.0 or later machine-wide first. Extract its Windows x64 archive into Program Files\DSC, or set DSC_PATH to the absolute path of an existing dsc.exe accessible to LocalSystem. DSC is not included." />
 
     <StandardDirectory Id="ProgramFiles64Folder">

@@ -46,6 +46,11 @@ try {
     Assert ($properties.ALLUSERS -eq '1') 'per-machine installation'
     Assert ($properties.ARPCOMMENTS -eq "dscd $Version") 'human-readable release version'
     Assert ($properties.SecureCustomProperties.Split(';') -contains 'DSC_PATH') 'secure public DSC_PATH'
+    foreach ($row in (Rows 'SELECT `Condition` FROM `LaunchCondition`' @('Condition'))) {
+        Assert ($row.Condition.Length -le 255) 'launch conditions fit the MSI column limit'
+    }
+    $searchPaths = @(Rows 'SELECT `Path` FROM `DrLocator`' @('Path'))
+    Assert (@($searchPaths | Where-Object Path -ceq '[DSC_SEARCH_DIR]').Count -eq 1) 'native explicit DSC directory search uses a formatted property'
     $files = @(Rows 'SELECT `File`, `Component_`, `FileName`, `Version`, `Language` FROM `File`' @('Id', 'Component', 'Name', 'Version', 'Language'))
     Assert ($files.Count -eq 2) 'only dscd.exe and LICENSE must be packaged'
     $executable = @($files | Where-Object Id -eq 'DaemonFile')
@@ -119,6 +124,12 @@ try {
     }
     Assert (@($registry | Where-Object { $_.Root -eq '2' -and $_.Key -eq 'Software\dsc-reconciler\dscd' -and $_.Name -eq 'DSC_PATH' -and $_.Value -eq '[DSC_PATH]' }).Count -eq 1) 'persisted DSC path'
     $actions = @(Rows 'SELECT `Action`, `Type`, `Target` FROM `CustomAction`' @('Name', 'Type', 'Target'))
+    $searchInitializer = @($actions | Where-Object Name -eq 'SetDSC_SEARCH_DIR')
+    Assert ($searchInitializer.Count -eq 1 -and ([int]$searchInitializer[0].Type -band 63) -eq 51 -and
+        $searchInitializer[0].Target -ceq '[DSC_PATH]\..') 'native search-directory property initialization'
+    $searchInitialization = [int]($sequence | Where-Object Action -eq 'SetDSC_SEARCH_DIR').Sequence
+    $appSearch = [int]($sequence | Where-Object Action -eq 'AppSearch').Sequence
+    Assert ($searchInitialization -gt 0 -and $searchInitialization -lt $appSearch) 'DSC parent directory initialized before AppSearch'
     foreach ($action in $actions) {
         Assert (([int]$action.Type -band 63) -eq 51 -or $action.Target -in @('SchedServiceConfig', 'ExecServiceConfig', 'RollbackServiceConfig')) "unexpected custom action $($action.Name)"
     }
