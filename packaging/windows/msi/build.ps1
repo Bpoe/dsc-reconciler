@@ -33,8 +33,11 @@ try {
 finally { $reader.Dispose() }
 $output = [IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Path $output -Force | Out-Null
+# Isolate each release's clean/build tracking so rebuilding an upgrade package
+# does not delete the earlier MSI from a shared output directory.
 dotnet build "$PSScriptRoot/dscd.wixproj" --configuration Release --nologo --no-incremental `
     "-p:ReleaseVersion=$Version" "-p:ProductVersion=$productVersion" "-p:BinaryPath=$binary" `
+    "-p:IntermediateOutputPath=obj/Release/$Version/" `
     "-p:OutputPath=$output/" "-p:AcceptEula=wix7"
 if ($LASTEXITCODE -ne 0) { throw "WiX build failed: $LASTEXITCODE" }
 $msi = Join-Path $output "dscd-$Version-windows-amd64.msi"

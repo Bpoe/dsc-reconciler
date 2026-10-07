@@ -435,9 +435,9 @@ and the in-memory SCM lifecycle are covered.
 Actual service registration and system shutdown were **not** exercised on this
 shared machine. The manual service-integration workflow provides disposable
 systemd/SCM smoke checks; its presence does not establish a completed run.
-Native Windows MSI compilation has passed on a disposable runner. Inspection
-and installation smoke tests must also pass before claiming installer validation;
-compilation alone does not validate service registration or package lifecycle.
+Native Windows MSI compilation and table inspection have passed on a disposable
+runner. Installation smoke tests must also pass before claiming runtime validation;
+compilation and inspection alone do not validate service registration or package lifecycle.
 The opt-in Echo server test on Windows with DSC `3.3.0` passed for YAML/JSON
 configurations with no sidecar and with either inline parameter format in one
 initialized session. Other resources,
