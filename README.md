@@ -435,6 +435,9 @@ and the in-memory SCM lifecycle are covered.
 Actual service registration and system shutdown were **not** exercised on this
 shared machine. The manual service-integration workflow provides disposable
 systemd/SCM smoke checks; its presence does not establish a completed run.
+The MSI has not been built, inspected or installed in this Linux workspace.
+Native Windows CI and the manual installer smoke workflow require approval
+and a successful run before claiming installer validation.
 The opt-in Echo server test on Windows with DSC `3.3.0` passed for YAML/JSON
 configurations with no sidecar and with either inline parameter format in one
 initialized session. Other resources,

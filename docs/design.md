@@ -101,12 +101,13 @@ Initial Linux permissions are `0700` for a newly created results directory and
 local readers. Windows creates results directories and protects each result
 temporary file with a protected DACL granting full access only to SYSTEM,
 administrators and the daemon identity. Windows `0600` mode bits alone would
-not supply this protection. Do not change permissions or ownership of existing
-directories. Existing directories must already have trustworthy ACLs; an
+not supply this protection. The daemon does not change permissions or ownership
+of existing directories. Existing directories must already have trustworthy ACLs; an
 untrusted user able to replace directories can defeat path-based protections.
 Configuration files must be readable by the service account and writable only
-by trusted producers. The Windows installer provisions new input/output
-directories for LocalSystem and administrators.
+by trusted producers. The Windows MSI provisions and protects its input/output
+directories for LocalSystem and administrators without recursively rewriting
+unrelated files.
 
 Invalid startup configuration or an unavailable executable causes a clear error
 and a nonzero exit. Successful startup leads to an immediate reconciliation pass.
@@ -495,8 +496,8 @@ PowerShell service installer. It uses Windows Installer's standard directory
 properties: `[ProgramFiles64Folder]dscd\dscd.exe`,
 `[CommonAppDataFolder]dsc\config.d`, and
 `[CommonAppDataFolder]dsc\results.d`. The executable inherits Program Files'
-administrator-controlled permissions. Both data directories have protected
-inheritable DACLs permitting only SYSTEM and Administrators full access; no
+administrator-controlled permissions. The `dsc` data root and both directories
+have protected inheritable DACLs permitting only SYSTEM and Administrators full access; no
 recursive permission changes to unrelated content are performed.
 The directories remain after uninstall, including when empty.
 
@@ -520,7 +521,14 @@ interval and fifteen-minute execution timeout remain authoritative.
 Reconciliation starts immediately, then waits five minutes after each completed
 pass. Deploying trusted configurations does not require a service restart.
 Service recovery restarts after five seconds and resets its failure count after
-one day. Event Log registration is package-owned under HKLM, uses the existing
+one day. WiX's rollback-aware Util service configuration sets recovery actions;
+the native MSI service configuration sets recovery for nonzero service exits
+as well. Microsoft documents that this latter flag takes effect at the next
+system start (also applicable to `sc failureflag`) and that
+`MsiConfigureServices` has reliability limitations. Its specific WiX warning
+is suppressed; immediate non-crash recovery is not claimed. The smoke
+test checks the flag and actual recovery after forced process termination.
+Event Log registration is package-owned under HKLM, uses the existing
 Application source `dscd` and preserves Event ID 1 / JSON logging.
 
 Major upgrades use a stable UpgradeCode and a new ProductCode per package
@@ -546,11 +554,16 @@ marked pre-release, even when a stable-form tag is selected.
 
 WiX Toolset 7.0.0 is pinned for builds; no Go source compilation happens inside
 the installer project. The packaging build accepts a previously built executable.
+Go's unversioned PE receives release-version and language-neutral MSI file
+metadata to ensure upgrade replacement; that intentional override's warning
+is also suppressed. All other WiX warnings fail the build.
 Build-time PowerShell scripts validate the version and inspect Windows Installer
 tables for x64 architecture, metadata, paths, payload, service settings,
 recovery, Event Log registration and directory ACLs. PowerShell, Go, .NET and WiX
 are not target-machine prerequisites. Review WiX's
 [maintenance fee terms](https://docs.firegiant.com/wix/osmf/) before building.
+The build requires `-AcceptWixEula`; approving/running the packaging workflows
+uses that explicit acceptance, so maintainers must review those terms first.
 Ordinary CI and release builds inspect the MSI but never install it.
 The manual `service-integration.yaml` workflow installs it on a disposable
 Windows runner with DSC 3.3.0 at a machine-wide path containing spaces and an

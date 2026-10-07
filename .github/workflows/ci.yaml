@@ -7,6 +7,9 @@ on:
 permissions:
   contents: read
 
+env:
+  WIX_VERSION: '7.0.0'
+
 jobs:
   check:
     strategy:
@@ -55,5 +58,5 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .\packaging\windows\msi\test-version.ps1
           .\packaging\windows\msi\build.ps1 -Version v0.0.1-rc.1 `
-              -BinaryPath "$env:RUNNER_TEMP\dscd.exe" -OutputPath "$env:RUNNER_TEMP\dscd.msi"
-          .\packaging\windows\msi\inspect.ps1 -Path "$env:RUNNER_TEMP\dscd.msi" -Version v0.0.1-rc.1
+              -BinaryPath "$env:RUNNER_TEMP\dscd.exe" -OutputDirectory "$env:RUNNER_TEMP\dscd-msi" `
+              -WixVersion $env:WIX_VERSION -AcceptWixEula

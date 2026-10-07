@@ -18,6 +18,7 @@ concurrency:
 
 env:
   VERSION: ${{ inputs.version }}
+  WIX_VERSION: '7.0.0'
 
 jobs:
   build:
@@ -76,8 +77,9 @@ jobs:
           $bin = Join-Path $package 'bin'
           $docs = Join-Path $package 'docs'
           $packaging = Join-Path $package 'packaging'
+          $windows = Join-Path $packaging 'windows'
           $dist = Join-Path $env:RUNNER_TEMP 'release-dist'
-          New-Item -ItemType Directory -Path $bin, $docs, $packaging, $dist -Force | Out-Null
+          New-Item -ItemType Directory -Path $bin, $docs, $windows, $dist -Force | Out-Null
           $executable = Join-Path $bin 'dscd.exe'
           go build -trimpath -o $executable ./cmd/dscd
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -85,12 +87,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item README.md, LICENSE, AGENTS.md -Destination $package
           Copy-Item (Join-Path 'docs' 'design.md') -Destination $docs
-          Copy-Item (Join-Path 'packaging' 'windows') -Destination $packaging -Recurse
+          Copy-Item packaging/windows/install.ps1, packaging/windows/uninstall.ps1, packaging/windows/test-service.ps1 `
+              -Destination $windows
           Compress-Archive -Path $package -DestinationPath (Join-Path $dist "$name.zip")
           .\packaging\windows\msi\test-version.ps1
+          $msiOutput = Join-Path $env:RUNNER_TEMP 'msi-output'
           .\packaging\windows\msi\build.ps1 -Version $env:VERSION -BinaryPath $executable `
-              -OutputPath (Join-Path $dist "$name.msi")
-          .\packaging\windows\msi\inspect.ps1 -Path (Join-Path $dist "$name.msi") -Version $env:VERSION
+              -OutputDirectory $msiOutput -WixVersion $env:WIX_VERSION -AcceptWixEula
+          Copy-Item (Join-Path $msiOutput "$name.msi") -Destination $dist
       - name: Build and package Linux
         if: runner.os == 'Linux'
         shell: bash

@@ -1,0 +1,145 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Package Name="DSC Reconciliation Daemon" Manufacturer="dsc-reconciler contributors"
+           Version="$(var.ProductVersion)" UpgradeCode="{536AF323-17B1-40ED-870C-751F063452AA}"
+           Scope="perMachine" InstallerVersion="500" Language="1033">
+    <SummaryInformation Description="dscd $(var.ReleaseVersion) Windows x64 installer" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of dscd is already installed."
+                  Schedule="afterInstallExecute" />
+    <MediaTemplate EmbedCab="yes" />
+    <Property Id="ARPCOMMENTS" Value="dscd $(var.ReleaseVersion)" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="DscPathQuote" Value="&quot;" />
+    <Property Id="DSC_PATH" Secure="yes" />
+    <Property Id="EXPLICIT_DSC_PATH" Secure="yes" />
+    <SetProperty Id="EXPLICIT_DSC_PATH" Value="[DSC_PATH]" Before="AppSearch"
+                 Condition="DSC_PATH" />
+
+    <!-- Searches never consult PATH or a user registry hive. The \.. suffix is
+         normalized by Windows to the executable's parent directory. The launch
+         condition requires an absolute drive path ending in \dsc.exe. -->
+    <Property Id="EXPLICIT_DSC" Secure="yes">
+      <DirectorySearch Id="ExplicitDSCDirectory" Path="[DSC_PATH]\.." Depth="0">
+        <FileSearch Id="ExplicitDSCFile" Name="dsc.exe" />
+      </DirectorySearch>
+    </Property>
+    <Property Id="SAVED_DSC" Secure="yes">
+      <RegistrySearch Id="SavedDSCPath" Root="HKLM" Key="Software\dsc-reconciler\dscd"
+                      Name="DSC_PATH" Type="raw" Bitness="always64" />
+    </Property>
+    <Property Id="SAVED_DSC_EXISTS" Secure="yes">
+      <RegistrySearch Id="SavedDSCFile" Root="HKLM" Key="Software\dsc-reconciler\dscd"
+                      Name="DSC_PATH" Type="file" Bitness="always64">
+        <FileSearch Id="SavedDSCSignature" Name="dsc.exe" />
+      </RegistrySearch>
+    </Property>
+    <Property Id="DEFAULT_DSC" Secure="yes">
+      <DirectorySearch Id="DefaultDSCDirectory" Path="[ProgramFiles64Folder]DSC" Depth="0">
+        <FileSearch Id="DefaultDSCFile" Name="dsc.exe" />
+      </DirectorySearch>
+    </Property>
+    <SetProperty Id="DSC_PATH" Value="[SAVED_DSC]" After="AppSearch"
+                 Action="RestoreDSCPath" Condition="NOT DSC_PATH AND SAVED_DSC" />
+    <SetProperty Id="DSC_PATH" Value="[DEFAULT_DSC]" After="RestoreDSCPath"
+                 Action="DefaultDSCPath" Condition="NOT DSC_PATH AND NOT SAVED_DSC" />
+    <Launch Condition='REMOVE="ALL" OR
+                       (DSC_PATH &gt;&lt; ":\" AND DSC_PATH ~&gt;&gt; "\dsc.exe" AND
+                        NOT (DSC_PATH &gt;&lt; DscPathQuote) AND
+                        ((EXPLICIT_DSC AND EXPLICIT_DSC_PATH ~= DSC_PATH) OR
+                         (SAVED_DSC_EXISTS AND SAVED_DSC ~= DSC_PATH) OR
+                         (DEFAULT_DSC AND DEFAULT_DSC ~= DSC_PATH)))'
+            Message="Install Microsoft DSC 3.3.0 or later machine-wide first. Extract its Windows x64 archive into Program Files\DSC, or set DSC_PATH to the absolute path of an existing dsc.exe accessible to LocalSystem. DSC is not included." />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="dscd">
+        <Component Id="Daemon" Guid="{2F1D5691-B568-458F-973A-65B0E966EC2C}" Bitness="always64">
+          <CreateFolder>
+            <PermissionEx Sddl="O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)" />
+          </CreateFolder>
+          <!-- Go's PE has no version resource; supply the release version so
+               late major upgrades always replace the previous executable.
+               Language 0 is neutral and satisfies ICE60 for this file row. -->
+          <File Id="DaemonFile" Source="$(var.BinaryPath)" Name="dscd.exe" KeyPath="yes"
+                DefaultVersion="$(var.ProductVersion).0" DefaultLanguage="0" />
+          <ServiceInstall Id="DaemonService" Name="dscd" DisplayName="DSC Reconciliation Daemon"
+                          Description="Periodically applies local DSC documents and publishes their latest results."
+                          Type="ownProcess" Start="auto" ErrorControl="normal" Account="LocalSystem"
+                          Vital="yes"
+                          Arguments='-config-dir "[CONFIGFOLDER]." -results-dir "[RESULTSFOLDER]." -dsc-path "[DSC_PATH]"'>
+            <!-- Util does not expose SERVICE_CONFIG_FAILURE_ACTIONS_FLAG.
+                 This native MSI setting retains recovery on handled nonzero
+                 SCM exits. MsiConfigureServices' documented reliability caveat
+                 remains; the Windows smoke test verifies the persisted flag.
+                 Microsoft documents activation at the next system start:
+                 https://learn.microsoft.com/windows/win32/api/winsvc/ns-winsvc-service_failure_actions_flag -->
+            <ServiceConfig FailureActionsWhen="failedToStopOrReturnedError"
+                           OnInstall="yes" OnReinstall="yes" />
+            <!-- MSI's MsiConfigureServices is documented as unreliable:
+                 https://learn.microsoft.com/windows/win32/msi/msiconfigureservices-action
+                 Use WiX's native, rollback-aware recovery action, not a script. -->
+            <util:ServiceConfig FirstFailureActionType="restart" SecondFailureActionType="restart"
+                                ThirdFailureActionType="restart" ResetPeriodInDays="1"
+                                RestartServiceDelayInSeconds="5" />
+          </ServiceInstall>
+          <!-- Recreate registration on install/repair so changed service
+               arguments take effect even with a late major upgrade. -->
+          <ServiceControl Id="DaemonControl" Name="dscd" Start="install" Stop="both"
+                          Remove="both" Wait="yes" />
+        </Component>
+        <Component Id="License" Guid="{8B637D5E-1A04-42D3-8108-3B0D78D0E814}" Bitness="always64">
+          <File Id="LicenseFile" Source="$(sys.SOURCEFILEDIR)..\..\..\LICENSE"
+                Name="LICENSE" KeyPath="yes" />
+        </Component>
+        <Component Id="Settings" Guid="{C64CF70E-6198-4C46-A9B0-05193D3C8CDF}" Bitness="always64">
+          <RegistryKey Root="HKLM" Key="Software\dsc-reconciler\dscd" ForceDeleteOnUninstall="yes">
+            <RegistryValue Name="DSC_PATH" Type="string" Value="[DSC_PATH]" KeyPath="yes" />
+          </RegistryKey>
+        </Component>
+        <Component Id="EventSource" Guid="{B032B603-FB39-4F5D-92E9-4AF25264C2BF}" Bitness="always64">
+          <RegistryKey Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\EventLog\Application\dscd"
+                       ForceDeleteOnUninstall="yes">
+            <RegistryValue Name="EventMessageFile" Type="expandable"
+                           Value="[System64Folder]EventCreate.exe" KeyPath="yes" />
+            <RegistryValue Name="TypesSupported" Type="integer" Value="7" />
+            <RegistryValue Name="CustomSource" Type="integer" Value="1" />
+          </RegistryKey>
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="DATAFOLDER" Name="dsc">
+        <Component Id="DataDirectory" Guid="{218B2567-8999-4EA9-96C6-4797E837C683}"
+                   Bitness="always64" Permanent="yes">
+          <CreateFolder>
+            <PermissionEx Sddl="O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" />
+          </CreateFolder>
+        </Component>
+        <Directory Id="CONFIGFOLDER" Name="config.d">
+          <Component Id="ConfigDirectory" Guid="{814646EB-7544-44AF-90D6-C999D46D78D8}"
+                     Bitness="always64" Permanent="yes">
+            <CreateFolder>
+              <PermissionEx Sddl="O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" />
+            </CreateFolder>
+          </Component>
+        </Directory>
+        <Directory Id="RESULTSFOLDER" Name="results.d">
+          <Component Id="ResultsDirectory" Guid="{4BB20836-B6E8-4CAC-BA5C-73F25698162C}"
+                     Bitness="always64" Permanent="yes">
+            <CreateFolder>
+              <PermissionEx Sddl="O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" />
+            </CreateFolder>
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+    <Feature Id="Complete" Title="dscd" Level="1">
+      <ComponentRef Id="Daemon" />
+      <ComponentRef Id="License" />
+      <ComponentRef Id="Settings" />
+      <ComponentRef Id="EventSource" />
+      <ComponentRef Id="DataDirectory" />
+      <ComponentRef Id="ConfigDirectory" />
+      <ComponentRef Id="ResultsDirectory" />
+    </Feature>
+  </Package>
+</Wix>
