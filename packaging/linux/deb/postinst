@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+[ "$1" = configure ] || exit 0
+for directory in /etc/dsc/config.d /var/lib/dsc/results.d; do
+    if [ ! -d "$directory" ]; then
+        install -d -o root -g root -m 0700 "$directory"
+    fi
+done
+
+deb-systemd-helper unmask dscd.service >/dev/null
+action=try-restart
+if ! deb-systemd-helper debian-installed dscd.service; then
+    deb-systemd-helper enable dscd.service >/dev/null
+    action=start
+fi
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    # Unlike restart, try-restart respects an administrator-stopped service.
+    deb-systemd-invoke "$action" dscd.service
+fi

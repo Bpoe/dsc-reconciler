@@ -44,6 +44,8 @@ dsc-reconciler/
 |       |-- writer.go
 |       `-- writer_test.go
 |-- packaging/
+|   |-- linux/
+|   |   `-- nfpm.yaml
 |   |-- systemd/
 |   |   `-- dscd.service
 |   `-- windows/
@@ -229,6 +231,17 @@ Build/inspect MSI tables in native Windows CI and release jobs; installation
 tests belong only in the manual service-integration workflow on disposable
 runners. No DSC bundling, per-user PATH discovery, migration logic or ARM64
 packaging. See [the packaging contract](docs/design.md#windows-msi).
+
+Linux AMD64 DEB/RPM packages share nFPM metadata under `packaging/linux` and the
+unit in `packaging/systemd`. Pin nFPM in workflows; do not add it to `go.mod`.
+Use the release tag for package versions, with prereleases sorting before stable.
+Declare Microsoft `dsc >= 3.3.0` as a package dependency; never bundle or download
+DSC in maintainer scripts or configure its repositories. Package-managed binaries
+use `/usr/bin` and the vendor unit directory is `/usr/lib/systemd/system`.
+New input/results directories are root-owned `0700`. Package removal, including
+purge, must preserve administrator documents and results. Keep package inspection
+separate from opt-in installation tests on disposable machines; only a running
+systemd environment validates service startup.
 
 Update `docs/design.md` and relevant tests when changing behavior or contracts.
 Update the README and packaging when changing operator-facing options. Inspect

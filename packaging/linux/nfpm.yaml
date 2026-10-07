@@ -1,0 +1,45 @@
+name: dscd
+arch: amd64
+platform: linux
+version: ${VERSION}
+maintainer: Bpoe <Bpoe@users.noreply.github.com>
+description: Local DSC reconciliation daemon
+homepage: https://github.com/Bpoe/dsc-reconciler
+license: MIT
+contents:
+  - src: ${STAGE_DIR}/dscd
+    dst: /usr/bin/dscd
+    expand: true
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+  - src: packaging/systemd/dscd.service
+    dst: /usr/lib/systemd/system/dscd.service
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+  - src: LICENSE
+    dst: /usr/share/licenses/dscd/LICENSE
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+overrides:
+  deb:
+    depends:
+      - dsc (>= 3.3.0)
+      - init-system-helpers (>= 1.54)
+    scripts:
+      postinstall: packaging/linux/deb/postinst
+      preremove: packaging/linux/deb/prerm
+      postremove: packaging/linux/deb/postrm
+  rpm:
+    depends:
+      - dsc >= 3.3.0
+      - systemd
+    scripts:
+      postinstall: packaging/linux/rpm/postinstall
+      preremove: packaging/linux/rpm/preremove
+      postremove: packaging/linux/rpm/postremove

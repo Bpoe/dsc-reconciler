@@ -60,3 +60,19 @@ jobs:
           .\packaging\windows\msi\build.ps1 -Version v0.0.1-rc.1 `
               -BinaryPath "$env:RUNNER_TEMP\dscd.exe" -OutputDirectory "$env:RUNNER_TEMP\dscd-msi" `
               -WixVersion $env:WIX_VERSION -AcceptWixEula
+      - name: Install Linux packaging tools
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm
+          GOBIN="$RUNNER_TEMP/package-tools" go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+          echo "$RUNNER_TEMP/package-tools" >> "$GITHUB_PATH"
+      - name: Build and inspect Linux packages (no installation)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          VERSION: v0.0.0-rc.1
+        run: |
+          bash packaging/linux/build.sh "$RUNNER_TEMP/packages"
+          bash packaging/linux/validate.sh "$RUNNER_TEMP/packages"

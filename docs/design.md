@@ -472,6 +472,28 @@ uses root because arbitrary DSC resources may require system modification; chang
 it to a least-privileged identity when the selected resources permit. Do not daemonize internally
 or invoke `sudo` from the daemon. Keep systemd details outside core packages.
 
+Linux AMD64 native DEB and RPM packages use shared nFPM definitions under
+`packaging/linux`. They install `/usr/bin/dscd` and the vendor unit at
+`/usr/lib/systemd/system/dscd.service`, with `/usr/bin/dsc` supplied by Microsoft's
+independent `dsc` package. The declared minimum dependency is `dsc >= 3.3.0`;
+the daemon packages neither bundle DSC nor configure Microsoft repositories.
+Go and packaging tools are build-time requirements only.
+
+Installation provisions missing `/etc/dsc/config.d` and
+`/var/lib/dsc/results.d` directories as root:root `0700`, without recursively
+changing existing permissions. It reloads systemd and enables/starts `dscd`
+when systemd is running. Upgrades replace package files and restart only a
+previously running service. Removal stops/disables the service and retains
+administrator documents and results, including during DEB purge; shared parent
+directories and DSC-managed machine state are never removed by scripts.
+Retain DSC on DNF removal with `--noautoremove` if it was dependency-installed.
+Image construction without running systemd skips runtime service operations
+while recording enablement for the image.
+Publish trusted documents into the input directory; a restart is not needed.
+The first pass is immediate and the default wait after each completed pass is
+five minutes. Use systemd drop-ins for local service customizations rather than
+editing the package-owned unit.
+
 The service manager handles restarts and final process cleanup. Provision one
 instance for each directory pair. The Windows MSI is under
 `packaging/windows/msi`, runs as LocalSystem, quotes all executable/path arguments,
@@ -488,6 +510,11 @@ draft pre-release with both archives, the Windows MSI and SHA-256 checksums
 covering every release artifact. Publishing remains
 an explicit review step; release tags are not reused. DSC and its resources are
 separate prerequisites, not bundled release dependencies.
+The Linux job also builds and inspects native packages; checksums cover both
+archives, both Linux packages and the Windows MSI. Release tag `vX.Y.Z-rc.N` maps to native version
+`X.Y.Z~rc.N` (RPM release `1`), sorting before stable `X.Y.Z`.
+Native packages contain the executable, unit and license, not development
+sources. Linux ARM64 packages and package feeds are not part of this release.
 
 ### Windows MSI
 
@@ -622,6 +649,10 @@ Use the build, test, vet, formatting, and race checks specified in
 for pushes and pull requests. Service-registration smoke tests run separately
 through `service-integration.yaml`, triggered manually with `workflow_dispatch`,
 only on disposable hosted runners.
+The Linux integration job installs Microsoft's DSC package and exercises native
+DEB install, stop/start, running/stopped upgrades, reinstall, removal and purge
+with real systemd. A separate Fedora image exercises RPM installation/lifecycle
+without a systemd manager; it does not certify RPM service startup.
 Normal tests cover the SCM handler using in-memory control/status channels;
 they do not register a service, reboot a machine, invoke real DSC, or change
 host desired state. SCM stop-during-startup, Stop, Shutdown, interrogation,
@@ -634,6 +665,14 @@ An opt-in Windows test against DSC `3.3.0` verified MCP initialization,
 EOF shutdown, Echo defaults and inline parameter overrides for all six
 configuration/parameter-format combinations in one shared server session.
 This is not native Linux hardware, general DSC resource or power-loss validation.
-Actual service installation, host-shutdown delivery and other DSC/resource compatibility must
-still be verified in a disposable deployment environment; CI definitions are
-not evidence of an already completed CI run.
+Native DEB/RPM build and artifact inspection passed locally, including ownership,
+permissions, unit verification and prerelease ordering. Disposable Ubuntu/Fedora
+containers with DSC 3.3.0 exercised package lifecycle and data preservation
+without running systemd, including DEB purge. This does not establish service
+startup or real DSC resource execution.
+The DEB lifecycle additionally passed on a disposable Ubuntu systemd host,
+including enable/start, stop/start, running/stopped/disabled upgrades, reinstall,
+remove/reinstall, removal/purge and data/permission preservation. Native RPM
+systemd startup, Windows service registration, host-shutdown delivery and other
+DSC/resource compatibility still need disposable deployment validation.
+CI definitions are not evidence of an already completed CI run.
