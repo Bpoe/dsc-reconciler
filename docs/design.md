@@ -442,6 +442,14 @@ stderr; SCM sends JSON messages to that source (Event ID 1, informational transp
 the JSON `level` records error severity). Logs are not stored in result files.
 See [README.md](../README.md) for installation, stop, removal and log access.
 
+Release candidates are built from a single selected revision by the manually
+triggered `release.yaml` workflow. Native Linux and Windows amd64 jobs test,
+build and package the daemon with platform service assets and the MIT license.
+Only after both jobs succeed does the workflow tag that revision and create a
+draft pre-release with both archives and SHA-256 checksums. Publishing remains
+an explicit review step; release tags are not reused. DSC and its resources are
+separate prerequisites, not bundled release dependencies.
+
 The execution timeout defaults to 15 minutes and is configurable, without adding
 parallel execution. Capture at most 16 MiB of stdout and 1 MiB of stderr per
 attempt. Crossing either limit cancels the process tree and yields an `output`

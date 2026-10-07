@@ -1,0 +1,144 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release candidate tag (vX.Y.Z-rc.N)
+        required: true
+        default: v0.0.1-rc.1
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  VERSION: ${{ inputs.version }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+          - os: windows-latest
+            platform: windows
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Validate version
+        run: |
+          if ($env:VERSION -cnotmatch '\Av(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-rc\.[1-9][0-9]*\z') {
+            throw 'Version must be a release candidate such as v0.0.1-rc.1.'
+          }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Check source
+        run: |
+          go mod verify
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test ./...
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go vet ./...
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $unformatted = @(gofmt -l .)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($unformatted.Count -ne 0) { $unformatted; throw 'Run gofmt on the files above.' }
+      - name: Build and package Windows
+        if: runner.os == 'Windows'
+        env:
+          CGO_ENABLED: '0'
+          GOARCH: amd64
+        run: |
+          $name = "dscd-$env:VERSION-windows-amd64"
+          $package = Join-Path $env:RUNNER_TEMP $name
+          $bin = Join-Path $package 'bin'
+          $docs = Join-Path $package 'docs'
+          $packaging = Join-Path $package 'packaging'
+          $dist = Join-Path $env:RUNNER_TEMP 'release-dist'
+          New-Item -ItemType Directory -Path $bin, $docs, $packaging, $dist -Force | Out-Null
+          $executable = Join-Path $bin 'dscd.exe'
+          go build -trimpath -o $executable ./cmd/dscd
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $executable -help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item README.md, LICENSE, AGENTS.md -Destination $package
+          Copy-Item (Join-Path 'docs' 'design.md') -Destination $docs
+          Copy-Item (Join-Path 'packaging' 'windows') -Destination $packaging -Recurse
+          Compress-Archive -Path $package -DestinationPath (Join-Path $dist "$name.zip")
+      - name: Build and package Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CGO_ENABLED: '0'
+          GOARCH: amd64
+        run: |
+          set -euo pipefail
+          name="dscd-$VERSION-linux-amd64"
+          package="$RUNNER_TEMP/$name"
+          dist="$RUNNER_TEMP/release-dist"
+          mkdir -p "$package/bin" "$package/docs" "$package/packaging" "$dist"
+          go build -trimpath -o "$package/bin/dscd" ./cmd/dscd
+          "$package/bin/dscd" -help
+          cp README.md LICENSE AGENTS.md "$package/"
+          cp docs/design.md "$package/docs/"
+          cp -R packaging/systemd "$package/packaging/"
+          tar -czf "$dist/$name.tar.gz" -C "$RUNNER_TEMP" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dscd-${{ matrix.platform }}-amd64
+          path: ${{ runner.temp }}/release-dist/*
+          if-no-files-found: error
+
+  draft:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dscd-*-amd64
+          merge-multiple: true
+          path: dist
+      - name: Checksum archives
+        working-directory: dist
+        run: |
+          sha256sum "dscd-$VERSION-linux-amd64.tar.gz" "dscd-$VERSION-windows-amd64.zip" > SHA256SUMS
+          sha256sum --check SHA256SUMS
+      - name: Create tag and draft pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          existing=$(git ls-remote --tags origin "refs/tags/$VERSION")
+          if [ -n "$existing" ]; then
+            echo "::error::Tag $VERSION already exists; release tags must not be reused."
+            exit 1
+          fi
+          git tag "$VERSION" "$GITHUB_SHA"
+          git push origin "refs/tags/$VERSION"
+          gh release create "$VERSION" \
+            "dist/dscd-$VERSION-linux-amd64.tar.gz" \
+            "dist/dscd-$VERSION-windows-amd64.zip" \
+            dist/SHA256SUMS \
+            --verify-tag --draft --prerelease \
+            --title "dscd $VERSION" --generate-notes \
+            --notes "Release candidate built from $GITHUB_SHA. Linux and Windows amd64 binaries include service assets and the MIT license. Install DSC and resources separately. This workflow does not run real DSC or service-installation tests."

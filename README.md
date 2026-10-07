@@ -93,6 +93,40 @@ Remove-Item Env:\DSCD_TEST_DSC_PATH
 
 Without that variable, normal tests skip real DSC execution.
 
+## Release candidates
+
+The manual [release workflow](.github/workflows/release.yaml) creates a **draft
+pre-release**, initially `v0.0.1-rc.1`. In GitHub, select **Actions > release >
+Run workflow**, choose the source branch, and enter a new
+`vX.Y.Z-rc.N` tag. Use a revision that has passed CI and review the separate
+service-integration results before publishing.
+
+The workflow tests and vets the selected revision on native Linux and Windows
+amd64 runners, checks formatting and module integrity, then builds binaries
+without a C runtime dependency. It does not run real DSC or install services;
+race checks remain in the normal CI workflow.
+
+The draft contains:
+
+- `dscd-v0.0.1-rc.1-linux-amd64.tar.gz`
+- `dscd-v0.0.1-rc.1-windows-amd64.zip`
+- `SHA256SUMS` covering both archives
+
+Each archive has a versioned root containing `bin/dscd` or `bin/dscd.exe`,
+platform-specific `packaging` assets, the README, design and agent documentation,
+and the MIT license. Extract the archive and follow the service instructions
+below; building from source is not required. DSC and resources are not bundled.
+On Linux, verify downloads with `sha256sum --check SHA256SUMS` with both archives
+present. On Windows, use `Get-FileHash -Algorithm SHA256` and compare the archive's
+hash with its entry in `SHA256SUMS`.
+
+Both platform jobs must succeed before a tag and draft are created. The tag
+points to the exact tested workflow revision, not the latest branch head.
+Existing tags are never moved or reused. Review the draft assets and notes in
+**Releases**, then publish it while retaining the pre-release designation.
+If a run fails after creating its tag, inspect the partial draft/tag before
+proceeding with a new candidate version; reruns do not overwrite existing releases.
+
 ## Foreground execution
 
 Start with an empty directory if you only want to inspect startup/shutdown.
