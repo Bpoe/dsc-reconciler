@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+if [ "$1" -eq 0 ]; then
+    if [ -d /run/systemd/system ]; then
+        systemctl stop dscd.service
+    fi
+    systemctl disable dscd.service
+fi
