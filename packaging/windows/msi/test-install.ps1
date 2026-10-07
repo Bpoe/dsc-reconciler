@@ -120,8 +120,10 @@ try {
     $directoryAsExecutable = Join-Path $logDirectory 'dsc.exe'
     New-Item -ItemType Directory -Path $directoryAsExecutable | Out-Null
     Invoke-Msi @('/i', "`"$MsiPath`"", "DSC_PATH=`"$directoryAsExecutable`"") 'directory-prerequisite' 1603
-    $quotedPath = $DSCPath.Insert($DSCPath.LastIndexOf('\'), '\bad\"\..')
-    Invoke-Msi @('/i', "`"$MsiPath`"", "DSC_PATH=`"$quotedPath`"") 'quoted-prerequisite' 1603
+    $quotedPath = $DSCPath.Insert($DSCPath.LastIndexOf('\'), '\bad"\..')
+    # Windows Installer escapes embedded quotes by doubling them, not with \.
+    $quotedProperty = 'DSC_PATH="' + $quotedPath.Replace('"', '""') + '"'
+    Invoke-Msi @('/i', "`"$MsiPath`"", $quotedProperty) 'quoted-prerequisite' 1603
     Assert (-not (Get-Service dscd -ErrorAction SilentlyContinue)) 'prerequisite failure has no service side effects'
     Invoke-Msi @('/i', "`"$MsiPath`"", "DSC_PATH=`"$DSCPath`"") 'install'
     $installedMsi = $MsiPath
