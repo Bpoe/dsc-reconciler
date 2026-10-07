@@ -6,8 +6,12 @@ on:
 permissions:
   contents: read
 
+env:
+  WIX_VERSION: '7.0.0'
+
 jobs:
   service:
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -19,13 +23,37 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Windows SCM integration (disposable runner only)
+      - name: Windows MSI integration (disposable runner only)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           go build -o bin\dscd.exe .\cmd\dscd
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          .\packaging\windows\test-service.ps1 -BinaryPath .\bin\dscd.exe
+          .\packaging\windows\msi\build.ps1 -Version v0.0.1-rc.1 `
+              -BinaryPath .\bin\dscd.exe -OutputDirectory "$env:RUNNER_TEMP\dscd-msi" `
+              -WixVersion $env:WIX_VERSION -AcceptWixEula
+          .\packaging\windows\msi\build.ps1 -Version v0.0.1-rc.2 `
+              -BinaryPath .\bin\dscd.exe -OutputDirectory "$env:RUNNER_TEMP\dscd-msi" `
+              -WixVersion $env:WIX_VERSION -AcceptWixEula
+          $dscRoot = Join-Path $env:ProgramFiles 'DSC smoke test'
+          $archive = Join-Path $env:RUNNER_TEMP 'dsc.zip'
+          Invoke-WebRequest -Uri 'https://github.com/PowerShell/DSC/releases/download/v3.3.0/DSC-3.3.0-x86_64-pc-windows-msvc.zip' `
+              -OutFile $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $dscRoot
+          $dsc = Join-Path $dscRoot 'dsc.exe'
+          & $dsc --version
+          if ($LASTEXITCODE -ne 0) { throw 'DSC prerequisite does not run.' }
+          .\packaging\windows\msi\test-install.ps1 `
+              -MsiPath "$env:RUNNER_TEMP\dscd-msi\dscd-v0.0.1-rc.1-windows-amd64.msi" `
+              -UpgradeMsiPath "$env:RUNNER_TEMP\dscd-msi\dscd-v0.0.1-rc.2-windows-amd64.msi" `
+              -DSCPath $dsc -Disposable
+      - name: Preserve Windows MSI logs
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-msi-logs
+          path: packaging/windows/msi/test-output/**/*.log
+          if-no-files-found: ignore
       - name: Build Linux packages (disposable runner only)
         if: runner.os == 'Linux'
         shell: bash

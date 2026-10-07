@@ -51,7 +51,8 @@ dsc-reconciler/
 |   `-- windows/
 |       |-- install.ps1
 |       |-- uninstall.ps1
-|       `-- test-service.ps1
+|       |-- test-service.ps1
+|       `-- msi/
 |-- docs/
 |   `-- design.md
 |-- go.mod
@@ -218,6 +219,18 @@ Viper, a database, generic stores, plugin machinery, nested module management,
 or a large lint stack speculatively. Future commands are not current requirements.
 Keep service-manager details in packaging and avoid platform assumptions in the
 core packages.
+
+Windows release packaging uses the native x64 WiX project under
+`packaging/windows/msi`. Keep WiX pinned, the UpgradeCode stable, and the
+documented release-tag-to-MSI version mapping ordered and collision-free.
+The MSI accepts a prebuilt executable, uses `DSC_PATH` for machine-wide DSC,
+and owns service/Event Log registration declaratively; never invoke the manual
+PowerShell installers from an MSI. Protect both ProgramData directories for
+SYSTEM and Administrators and preserve them and user data on uninstall.
+Build/inspect MSI tables in native Windows CI and release jobs; installation
+tests belong only in the manual service-integration workflow on disposable
+runners. No DSC bundling, per-user PATH discovery, migration logic or ARM64
+packaging. See [the packaging contract](docs/design.md#windows-msi).
 
 Linux AMD64 DEB/RPM packages share nFPM metadata under `packaging/linux` and the
 unit in `packaging/systemd`. Pin nFPM in workflows; do not add it to `go.mod`.

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release candidate tag (vX.Y.Z-rc.N)
+        description: Release tag (vX.Y.Z-rc.N or vX.Y.Z)
         required: true
         default: v0.0.1-rc.1
         type: string
@@ -18,6 +18,7 @@ concurrency:
 
 env:
   VERSION: ${{ inputs.version }}
+  WIX_VERSION: '7.0.0'
 
 jobs:
   build:
@@ -36,8 +37,13 @@ jobs:
     steps:
       - name: Validate version
         run: |
-          if ($env:VERSION -cnotmatch '\Av(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-rc\.[1-9][0-9]*\z') {
-            throw 'Version must be a release candidate such as v0.0.1-rc.1.'
+          if ($env:VERSION -cnotmatch '\Av(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?\z') {
+            throw 'Version must be vX.Y.Z-rc.N or vX.Y.Z.'
+          }
+          if ([bigint]$Matches[1] -gt 255 -or [bigint]$Matches[2] -gt 255 -or
+              [bigint]$Matches[3] -gt 654 -or
+              ($Matches[4] -and [bigint]$Matches[4].Substring(4) -gt 98)) {
+            throw 'MSI versions require major/minor <= 255, patch <= 654, and RC 1..98.'
           }
       - uses: actions/checkout@v4
         with:
@@ -50,6 +56,8 @@ jobs:
       - name: Check source
         run: |
           go mod verify
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build ./...
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go test ./...
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -69,8 +77,9 @@ jobs:
           $bin = Join-Path $package 'bin'
           $docs = Join-Path $package 'docs'
           $packaging = Join-Path $package 'packaging'
+          $windows = Join-Path $packaging 'windows'
           $dist = Join-Path $env:RUNNER_TEMP 'release-dist'
-          New-Item -ItemType Directory -Path $bin, $docs, $packaging, $dist -Force | Out-Null
+          New-Item -ItemType Directory -Path $bin, $docs, $windows, $dist -Force | Out-Null
           $executable = Join-Path $bin 'dscd.exe'
           go build -trimpath -o $executable ./cmd/dscd
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -78,8 +87,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item README.md, LICENSE, AGENTS.md -Destination $package
           Copy-Item (Join-Path 'docs' 'design.md') -Destination $docs
-          Copy-Item (Join-Path 'packaging' 'windows') -Destination $packaging -Recurse
+          Copy-Item packaging/windows/install.ps1, packaging/windows/uninstall.ps1, packaging/windows/test-service.ps1 `
+              -Destination $windows
           Compress-Archive -Path $package -DestinationPath (Join-Path $dist "$name.zip")
+          .\packaging\windows\msi\test-version.ps1
+          $msiOutput = Join-Path $env:RUNNER_TEMP 'msi-output'
+          .\packaging\windows\msi\build.ps1 -Version $env:VERSION -BinaryPath $executable `
+              -OutputDirectory $msiOutput -WixVersion $env:WIX_VERSION -AcceptWixEula
+          Copy-Item (Join-Path $msiOutput "$name.msi") -Destination $dist
       - name: Build and package Linux
         if: runner.os == 'Linux'
         shell: bash
@@ -140,7 +155,8 @@ jobs:
           sha256sum "dscd-$VERSION-linux-amd64.tar.gz" \
             "dscd_${package_version}_amd64.deb" \
             "dscd-${package_version}-1.x86_64.rpm" \
-            "dscd-$VERSION-windows-amd64.zip" > SHA256SUMS
+            "dscd-$VERSION-windows-amd64.zip" \
+            "dscd-$VERSION-windows-amd64.msi" > SHA256SUMS
           sha256sum --check SHA256SUMS
       - name: Create tag and draft pre-release
         env:
@@ -157,9 +173,10 @@ jobs:
           gh release create "$VERSION" \
             "dist/dscd-$VERSION-linux-amd64.tar.gz" \
             "dist/dscd-$VERSION-windows-amd64.zip" \
+            "dist/dscd-$VERSION-windows-amd64.msi" \
             dist/dscd_*.deb \
             dist/dscd-*.rpm \
             dist/SHA256SUMS \
             --verify-tag --draft --prerelease \
             --title "dscd $VERSION" --generate-notes \
-            --notes "Release candidate built from $GITHUB_SHA. Linux amd64 DEB/RPM packages and Linux/Windows amd64 archives include service assets and the MIT license. Native packages require Microsoft dsc >= 3.3.0 from a configured repository or separate installation. Install resources separately. This workflow inspects packages but does not run real DSC or service-installation tests."
+            --notes "Built from $GITHUB_SHA. Linux amd64 DEB/RPM packages, Windows x64 MSI, and Linux/Windows amd64 archives include service assets and the MIT license. Native packages require Microsoft DSC >= 3.3.0 installed separately. Install resources separately. This workflow inspects packages; installation tests run separately in the manual service-integration workflow."

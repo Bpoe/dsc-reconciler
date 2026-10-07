@@ -1,4 +1,7 @@
 /bin/
+/packaging/windows/msi/bin/
+/packaging/windows/msi/obj/
+/packaging/windows/msi/test-output/
 *.exe
 *.test
 *.test.exe

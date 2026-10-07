@@ -1,0 +1,17 @@
+<Project Sdk="WixToolset.Sdk/7.0.0">
+  <PropertyGroup>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <OutputType>Package</OutputType>
+    <OutputName>dscd-$(ReleaseVersion)-windows-amd64</OutputName>
+    <DefineConstants>ReleaseVersion=$(ReleaseVersion);ProductVersion=$(ProductVersion);BinaryPath=$(BinaryPath);SearchHelperPath=$(SearchHelperPath)</DefineConstants>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- 1103: Go's unversioned PE intentionally gets a release file version to
+         force replacement; the smoke test proves the old payload is replaced.
+         1149: Util lacks the non-crash failure flag; the smoke test checks its
+         persisted value, not activation before the next system start. -->
+    <SuppressSpecificWarnings>1103;1149</SuppressSpecificWarnings>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Util.wixext" Version="7.0.0" />
+  </ItemGroup>
+</Project>

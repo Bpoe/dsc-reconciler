@@ -117,7 +117,7 @@ validation. Installation smoke tests are destructive and disposable-only.
 The manual [release workflow](.github/workflows/release.yaml) creates a **draft
 pre-release**, initially `v0.0.1-rc.1`. In GitHub, select **Actions > release >
 Run workflow**, choose the source branch, and enter a new
-`vX.Y.Z-rc.N` tag. Use a revision that has passed CI and review the separate
+`vX.Y.Z-rc.N` or `vX.Y.Z` tag. Use a revision that has passed CI and review the separate
 service-integration results before publishing.
 
 The workflow tests and vets the selected revision on native Linux and Windows
@@ -131,12 +131,13 @@ The draft contains (for Linux AMD64 and Windows AMD64):
 - `dscd_0.0.1~rc.1_amd64.deb`
 - `dscd-0.0.1~rc.1-1.x86_64.rpm`
 - `dscd-v0.0.1-rc.1-windows-amd64.zip`
-- `SHA256SUMS` covering all four artifacts
+- `dscd-v0.0.1-rc.1-windows-amd64.msi` (recommended Windows installation)
+- `SHA256SUMS` covering all release artifacts
 
 Each archive has a versioned root containing `bin/dscd` or `bin/dscd.exe`,
 platform-specific `packaging` assets, the README, design and agent documentation,
 and the MIT license. Use the native Linux packages for systemd installation, or
-extract an archive for foreground execution / Windows service installation.
+extract an archive for foreground execution. Use the MSI for Windows service installation.
 Building from source is not required. DSC and resources are not bundled.
 On Linux, verify downloads with `sha256sum --check --ignore-missing SHA256SUMS`.
 On Windows, use `Get-FileHash -Algorithm SHA256` and compare the archive's
@@ -418,49 +419,76 @@ service; enable/start it when booted.
 DNF's `--noautoremove` retains DSC even if it was installed only as a dependency;
 do not request dependency auto-removal if DSC must remain installed.
 
-## Windows service: native SCM
+## Windows service: native MSI
 
-Use an elevated PowerShell session. Copy the built executable to a permanent,
-administrator-controlled location and install DSC/resources machine-wide:
+First install Microsoft DSC **3.3.0 or later** and the required resources
+machine-wide. The official Windows x64 [DSC release ZIP](https://github.com/PowerShell/DSC/releases/tag/v3.3.0)
+can be extracted by an administrator to `%ProgramFiles%\DSC`, with `dsc.exe`
+directly in that directory. This is the installer's default lookup location,
+not a guaranteed WinGet installation layout. Per-user WinGet/Store installs
+and your interactive PATH are not used. LocalSystem must be able to execute
+DSC and access its resources; protect those files against unprivileged writes.
+
+Download the MSI from a release and double-click it, approving elevation,
+or run:
 
 ```powershell
-New-Item -ItemType Directory -Force 'C:\Program Files\dscd' | Out-Null
-Copy-Item .\bin\dscd.exe 'C:\Program Files\dscd\dscd.exe'
-.\packaging\windows\install.ps1 `
-    -BinaryPath 'C:\Program Files\dscd\dscd.exe' `
-    -DSCPath 'C:\Program Files\DSC\dsc.exe'
-Start-Service dscd
+msiexec /i .\dscd-<version>-windows-amd64.msi
 Get-Service dscd
-Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='dscd'} -MaxEvents 20 |
-    Select-Object TimeCreated, Message
 ```
 
-The installer registers automatic startup/recovery and the `dscd` Application
-Event Log source, quotes paths, and provisions new input/results directories.
-It deliberately defaults to **LocalSystem**. Review existing directory ACLs and
-resource privileges before starting. Installation refuses to overwrite an
-existing service. If an installation step fails, it reports the error; inspect
-and remove a partially registered service before retrying.
+For unattended installation, use an elevated session:
+
+```powershell
+msiexec /i .\dscd-<version>-windows-amd64.msi /qn /norestart
+# If DSC is installed elsewhere, supply its absolute executable path:
+msiexec /i .\dscd-<version>-windows-amd64.msi DSC_PATH="C:\Tools\DSC\dsc.exe" /qn /norestart
+```
+
+The MSI checks that the DSC executable exists; it does not validate its version,
+download it or install resources. Verify `dsc.exe --version` yourself.
+Go, WiX and PowerShell are not required on the target machine.
+
+The MSI installs `%ProgramFiles%\dscd\dscd.exe`, registers **dscd**
+(**DSC Reconciliation Daemon**) as an automatic **LocalSystem** service,
+starts it, and configures restart after five seconds with a one-day failure
+count reset. It creates `%ProgramData%\dsc\config.d` and `results.d` with
+protected access for SYSTEM and Administrators only. Results may contain secrets.
+
+Copy trusted configuration documents and optional parameter sidecars into
+`%ProgramData%\dsc\config.d` as an administrator. No restart is required:
+reconciliation runs immediately at startup and then waits five minutes after
+each completed pass. The MSI uses the default fifteen-minute execution timeout.
 
 The binary automatically detects SCM operation, accepts Stop and Shutdown, and
 reports lifecycle progress. JSON messages use Event ID 1; inspect their `level`
 property rather than the informational Event Log transport severity. Host
 shutdown policy may terminate services sooner than the daemon's own bound.
-For a restricted service account, configure that identity in SCM and grant only
-the needed executable, resource, input, result and Event Log access.
 
 ```powershell
+Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='dscd'} -MaxEvents 20 |
+    Select-Object TimeCreated, Message
 Stop-Service dscd
 Start-Service dscd
 Restart-Service dscd
-.\packaging\windows\uninstall.ps1
-# Optional, after removal:
-Remove-Item -LiteralPath 'C:\Program Files\dscd\dscd.exe'
+# Upgrade by installing a newer MSI; DSC_PATH is retained unless overridden.
+msiexec /i .\dscd-<new-version>-windows-amd64.msi /qn /norestart
+# Uninstall using the installed package, or Windows Installed apps:
+msiexec /x .\dscd-<installed-version>-windows-amd64.msi /qn /norestart
 ```
 
-Uninstallation stops the service, removes its SCM registration and Event Log
-source, and retains binaries, documents, results and historical events. Changing
-flags requires updating the registered binary command line or reinstalling.
+Upgrades stop the service before replacing it and restart it afterward.
+Uninstall removes the executable, service and package-owned Event Log source,
+but retains both data directories, documents, results, Microsoft DSC and
+previously reconciled machine state. Standard MSI repair restores package-owned
+resources without overwriting configuration documents.
+
+The ZIP and `packaging/windows/install.ps1`, `uninstall.ps1`, and
+`test-service.ps1` remain development/manual-testing options, not MSI dependencies.
+There is no migration from manually registered services.
+Installer build/version details are in [the design](docs/design.md#windows-msi).
+The manual service-integration workflow builds, inspects and installs the MSI
+on a disposable Windows runner; ordinary CI only builds and inspects it.
 
 ## Validation limits
 
@@ -468,6 +496,13 @@ Local build, unit/process/filesystem tests, vet and race checks ran on Windows
 amd64 and Linux amd64 under WSL. Process cleanup, output limits, replacement of
 existing files, concurrent readers, private permissions, paths with spaces,
 and the in-memory SCM lifecycle are covered.
+
+Native Windows MSI builds, table inspection and the full installation lifecycle
+passed on a disposable runner in [service-integration run 37578288245](https://github.com/Bpoe/dsc-reconciler/actions/runs/37578288245).
+This covered prerequisites, service/ACL/Event Log/recovery checks, explicit DSC
+path overrides, upgrade and payload replacement, downgrade rejection, repair,
+reinstall, uninstall and data retention. Host-shutdown delivery and the complete
+draft-release workflow remain unverified.
 
 Native DEB/RPM builds, metadata, permissions, prerelease ordering and extracted
 systemd units were verified locally. With Microsoft DSC 3.3.0 installed,
@@ -477,8 +512,8 @@ Those checks do not validate service startup.
 The DEB lifecycle also passed on a disposable Ubuntu systemd host: initial
 enable/start, stop/start, running/stopped/disabled upgrades, reinstall,
 remove/reinstall, removal/purge and data/permission preservation. Native RPM
-service startup, Windows service registration and host shutdown remain
-unverified by these local checks. The manual service-integration workflow
+service startup and host shutdown remain
+unverified by these local Linux checks. The manual service-integration workflow
 provides disposable systemd/SCM smoke checks; its presence does not establish
 a completed GitHub Actions run.
 The opt-in Echo server test on Windows with DSC `3.3.0` passed for YAML/JSON
