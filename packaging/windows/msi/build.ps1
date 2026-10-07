@@ -47,7 +47,7 @@ $properties = @(
     "-p:OutputPath=$output/"
     '-p:AcceptEula=wix7'
 )
-dotnet restore "$PSScriptRoot/dscd.wixproj" --nologo --verbosity normal @properties
+dotnet restore "$PSScriptRoot/dscd.wixproj" --nologo --verbosity normal
 if ($LASTEXITCODE -ne 0) { throw "WiX dependency restore failed: $LASTEXITCODE" }
 Import-Module (Join-Path $visualStudio 'Common7/Tools/Microsoft.VisualStudio.DevShell.dll')
 Enter-VsDevShell -VsInstallPath $visualStudio -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
