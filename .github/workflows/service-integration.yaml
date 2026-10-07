@@ -6,9 +6,6 @@ on:
 permissions:
   contents: read
 
-env:
-  WIX_VERSION: '7.0.0'
-
 jobs:
   service:
     timeout-minutes: 15
@@ -32,11 +29,9 @@ jobs:
           go build -o bin\dscd.exe .\cmd\dscd
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .\packaging\windows\msi\build.ps1 -Version v0.0.1-rc.1 `
-              -BinaryPath .\bin\dscd.exe -OutputDirectory "$env:RUNNER_TEMP\dscd-msi" `
-              -WixVersion $env:WIX_VERSION -AcceptWixEula
+              -BinaryPath .\bin\dscd.exe -OutputDirectory "$env:RUNNER_TEMP\dscd-msi"
           .\packaging\windows\msi\build.ps1 -Version v0.0.1-rc.2 `
-              -BinaryPath .\bin\dscd.exe -OutputDirectory "$env:RUNNER_TEMP\dscd-msi" `
-              -WixVersion $env:WIX_VERSION -AcceptWixEula
+              -BinaryPath .\bin\dscd.exe -OutputDirectory "$env:RUNNER_TEMP\dscd-msi"
           foreach ($version in @('v0.0.1-rc.1', 'v0.0.1-rc.2')) {
             .\packaging\windows\msi\inspect.ps1 `
                 -MsiPath "$env:RUNNER_TEMP\dscd-msi\dscd-$version-windows-amd64.msi" -Version $version

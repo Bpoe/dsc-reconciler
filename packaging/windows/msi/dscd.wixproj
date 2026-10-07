@@ -1,5 +1,6 @@
 <Project Sdk="WixToolset.Sdk/7.0.0">
   <PropertyGroup>
+    <AcceptEula>wix7</AcceptEula>
     <InstallerPlatform>x64</InstallerPlatform>
     <OutputType>Package</OutputType>
     <OutputName>dscd-$(ReleaseVersion)-windows-amd64</OutputName>

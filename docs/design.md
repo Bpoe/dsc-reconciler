@@ -590,8 +590,9 @@ upgrades in increasing release order. The full tag remains in artifact names
 and human-readable package metadata. Release workflows still create drafts
 marked pre-release, even when a stable-form tag is selected.
 
-WiX Toolset 7.0.0 is pinned for builds; no Go source compilation happens inside
-the installer project. The packaging build accepts a previously built executable.
+The WiX SDK and Util extension versions are pinned only in `dscd.wixproj`;
+no Go source compilation happens inside the installer project. The packaging
+build accepts a previously built executable.
 `build.ps1` maps the release version and invokes `dotnet build`, including its
 normal dependency restore. No native helper, Visual C++ tools, developer shell
 or Windows SDK build dependency is required. The .NET SDK and PowerShell are
@@ -606,8 +607,9 @@ path persistence and PATH modification. Each packaging workflow invokes
 `inspect.ps1` after `build.ps1`. PowerShell, Go, .NET and WiX
 are not target-machine prerequisites. Review WiX's
 [maintenance fee terms](https://docs.firegiant.com/wix/osmf/) before building.
-The build requires `-AcceptWixEula`; approving/running the packaging workflows
-uses that explicit acceptance, so maintainers must review those terms first.
+The project records acceptance for automated builds with
+`<AcceptEula>wix7</AcceptEula>`; WiX enforces EULA acceptance without a custom
+script switch or guard.
 Ordinary CI and release builds inspect the MSI but never install it.
 The manual `service-integration.yaml` workflow installs it on a disposable
 Windows runner with DSC 3.3.0 visible through the machine PATH and an
