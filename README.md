@@ -18,7 +18,7 @@ resource model. DSC owns testing and applying configurations. See the
 ## Prerequisites and compatibility
 
 - Go **1.27.x** to build; no Go installation is needed to run the compiled binary.
-- Microsoft **DSC 3.3.0** with `dsc server` and the resources your documents
+- Microsoft **DSC 3.3.0 or later** with `dsc server` and the resources your documents
   require, installed for the account running the daemon. This is modern DSC, not Windows
   PowerShell's `Start-DscConfiguration`.
 - Linux with a local filesystem supporting atomic rename and directory fsync
@@ -75,7 +75,8 @@ if ($LASTEXITCODE -ne 0 -or $unformatted.Count) { throw 'Formatting check failed
 Normal tests use temporary files, fakes and controlled helper executables, not
 DSC. They do not install services or change machine configuration.
 [CI](.github/workflows/ci.yaml) runs native build/test/vet/format/race checks on
-both OSes for pushes and pull requests. Service smoke tests run separately on
+both OSes for pushes and pull requests, plus Linux package build/inspection
+without installation. Service smoke tests run separately on
 disposable runners through the manual
 [service-integration workflow](.github/workflows/service-integration.yaml):
 in GitHub, select **Actions > service-integration > Run workflow**.
@@ -93,6 +94,23 @@ Remove-Item Env:\DSCD_TEST_DSC_PATH
 
 Without that variable, normal tests skip real DSC execution.
 
+### Build Linux packages
+
+On Linux AMD64, install nFPM **v2.47.0** as a build tool (not a daemon dependency)
+and ensure `dpkg-deb`, `rpm`, `rpm2cpio`, `cpio` and `systemd-analyze` are available:
+
+```sh
+go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+# Ensure Go's bin directory is on PATH.
+VERSION=v0.0.1-rc.1 bash packaging/linux/build.sh dist
+VERSION=v0.0.1-rc.1 bash packaging/linux/validate.sh dist
+```
+
+Validation extracts packages without installing them. The manual integration
+workflow additionally tests DEB lifecycle with real systemd on Ubuntu and RPM
+lifecycle in a Fedora image without systemd; the latter is not service-startup
+validation. Installation smoke tests are destructive and disposable-only.
+
 ## Release candidates
 
 The manual [release workflow](.github/workflows/release.yaml) creates a **draft
@@ -106,18 +124,21 @@ amd64 runners, checks formatting and module integrity, then builds binaries
 without a C runtime dependency. It does not run real DSC or install services;
 race checks remain in the normal CI workflow.
 
-The draft contains:
+The draft contains (for Linux AMD64 and Windows AMD64):
 
 - `dscd-v0.0.1-rc.1-linux-amd64.tar.gz`
+- `dscd_0.0.1~rc.1_amd64.deb`
+- `dscd-0.0.1~rc.1-1.x86_64.rpm`
 - `dscd-v0.0.1-rc.1-windows-amd64.zip`
-- `SHA256SUMS` covering both archives
+- `SHA256SUMS` covering all four artifacts
 
 Each archive has a versioned root containing `bin/dscd` or `bin/dscd.exe`,
 platform-specific `packaging` assets, the README, design and agent documentation,
-and the MIT license. Extract the archive and follow the service instructions
-below; building from source is not required. DSC and resources are not bundled.
-On Linux, verify downloads with `sha256sum --check SHA256SUMS` with both archives
-present. On Windows, use `Get-FileHash -Algorithm SHA256` and compare the archive's
+and the MIT license. Use the native Linux packages for systemd installation, or
+extract an archive for foreground execution / Windows service installation.
+Building from source is not required. DSC and resources are not bundled.
+On Linux, verify downloads with `sha256sum --check --ignore-missing SHA256SUMS`.
+On Windows, use `Get-FileHash -Algorithm SHA256` and compare the archive's
 hash with its entry in `SHA256SUMS`.
 
 Both platform jobs must succeed before a tag and draft are created. The tag
@@ -319,17 +340,39 @@ input existence and schema version, and tolerate unknown fields.
 
 ## Linux service: systemd
 
-Install DSC and its resources first. As an administrator:
+Configure an [official Microsoft package repository](https://learn.microsoft.com/en-us/powershell/dsc/install?view=dsc-3.0)
+that supplies `dsc` for your distribution, or install Microsoft's
+[DSC release package](https://github.com/PowerShell/DSC/releases/tag/v3.3.0)
+separately. The daemon packages depend on `dsc >= 3.3.0`; APT/DNF resolve it when
+available in configured repositories. They do not add repositories, download DSC
+in install scripts, or bundle DSC/resources. Microsoft packages provide
+`/usr/bin/dsc`. Install any required resources for root.
+
+If your configured repository supplies DSC, install it with `sudo apt install dsc`
+or `sudo dnf install dsc`. Otherwise download the corresponding official
+`dsc_3.3.0-1_amd64.deb` or `dsc-3.3.0-1.x86_64.rpm` release asset and install
+it with APT/DNF before installing `dscd`.
+
+Download the matching AMD64 package from GitHub Releases, then:
+
+Debian / Ubuntu:
 
 ```sh
-sudo install -m 0755 bin/dscd /usr/local/bin/dscd
-sudo install -d -m 0700 /etc/dsc/config.d /var/lib/dsc/results.d
-sudo install -m 0644 packaging/systemd/dscd.service /etc/systemd/system/dscd.service
-# Edit ExecStart if DSC is not at /usr/local/bin/dsc.
-sudo systemctl daemon-reload
-sudo systemctl enable --now dscd
-sudo systemctl status dscd
-sudo journalctl -u dscd -f
+sudo apt install ./dscd_0.0.1~rc.1_amd64.deb
+```
+
+Fedora / RHEL-compatible systems:
+
+```sh
+sudo dnf install ./dscd-0.0.1~rc.1-1.x86_64.rpm
+```
+
+Use the filenames for your selected version. Installation enables and starts
+`dscd` when systemd is running:
+
+```sh
+systemctl status dscd
+journalctl -u dscd -f
 ```
 
 The supplied unit deliberately runs as **root** because general DSC resources
@@ -338,20 +381,41 @@ to set a least-privileged user/group and provision access to both directories an
 resources. No speculative resource-breaking sandbox restrictions are enabled.
 `KillMode=control-group` and `TimeoutStopSec=40s` provide final descendant cleanup.
 
-Stop/restart and remove (retaining documents/results):
+The package installs `/usr/bin/dscd` and the vendor unit at
+`/usr/lib/systemd/system/dscd.service`. It creates `/etc/dsc/config.d` and
+`/var/lib/dsc/results.d` as root:root `0700` when absent, without recursively
+changing existing data permissions. Results are private `0600` files.
+Only trusted administrators should publish documents:
+
+```sh
+sudo install -m 0600 ./10-example.yaml /etc/dsc/config.d/10-example.yaml
+```
+
+The daemon reconciles immediately on startup, then waits five minutes after
+each completed pass. New documents are discovered on the next pass; deploying
+them does **not** require a restart. Adding a document authorizes privileged
+machine changes.
+
+Manage the service:
 
 ```sh
 sudo systemctl stop dscd
 sudo systemctl start dscd
 sudo systemctl restart dscd
-sudo systemctl disable --now dscd
-sudo rm /etc/systemd/system/dscd.service
-sudo systemctl daemon-reload
-sudo rm /usr/local/bin/dscd
 ```
 
-Review and remove any administrator-created drop-ins separately. Removing the
-daemon never undoes DSC-managed state.
+Upgrade by installing a newer package with the same APT/DNF command. Release
+candidates use `~rc.N` in native versions so the stable version sorts later.
+Upgrades preserve documents/results and restart the service only if it was
+running. Remove with `sudo apt remove dscd` or
+`sudo dnf remove --noautoremove dscd`; removal
+stops and disables the service but retains documents, results, DSC and all
+DSC-managed machine state. Even `sudo apt purge dscd` retains user data.
+Review administrator-created systemd drop-ins separately. During image
+construction without running systemd, package installation does not start a
+service; enable/start it when booted.
+DNF's `--noautoremove` retains DSC even if it was installed only as a dependency;
+do not request dependency auto-removal if DSC must remain installed.
 
 ## Windows service: native SCM
 

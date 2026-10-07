@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+
+for directory in /etc/dsc/config.d /var/lib/dsc/results.d; do
+    if [ ! -d "$directory" ]; then
+        install -d -o root -g root -m 0700 "$directory"
+    fi
+done
+
+if [ "$1" -eq 1 ]; then
+    systemctl enable dscd.service
+fi
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    if [ "$1" -eq 1 ]; then
+        systemctl start dscd.service
+    else
+        systemctl try-restart dscd.service
+    fi
+fi

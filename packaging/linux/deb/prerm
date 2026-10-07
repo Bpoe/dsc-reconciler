@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+if [ "$1" = remove ]; then
+    if [ -d /run/systemd/system ]; then
+        deb-systemd-invoke stop dscd.service
+    fi
+    deb-systemd-helper disable dscd.service >/dev/null
+fi

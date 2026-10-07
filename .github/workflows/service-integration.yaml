@@ -26,24 +26,60 @@ jobs:
           go build -o bin\dscd.exe .\cmd\dscd
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .\packaging\windows\test-service.ps1 -BinaryPath .\bin\dscd.exe
-      - name: Linux systemd integration (disposable runner only)
+      - name: Build Linux packages (disposable runner only)
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
-          go build -o bin/dscd ./cmd/dscd
-          root=$(mktemp -d '/tmp/dscd service test.XXXXXX')
-          unit="dscd-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          trap 'sudo systemctl stop "$unit" || true; rm -f "$root/dscd"; rmdir "$root/input" "$root/results" "$root"' EXIT
-          mkdir "$root/input" "$root/results"
-          cp bin/dscd "$root/dscd"
-          sudo systemd-run --unit="$unit" --property=KillMode=control-group --property=TimeoutStopSec=40s \
-            "$root/dscd" -config-dir "$root/input" -results-dir "$root/results" -dsc-path "$root/dscd"
-          for i in $(seq 1 50); do
-            if sudo journalctl -u "$unit" --no-pager | grep -q 'dscd started'; then break; fi
-            sleep 0.1
+          sudo apt-get update
+          sudo apt-get install -y rpm cpio
+          GOBIN="$RUNNER_TEMP/package-tools" go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+          export PATH="$RUNNER_TEMP/package-tools:$PATH"
+          for version in v0.0.0-rc.1 v0.0.0; do
+            VERSION="$version" bash packaging/linux/build.sh "$RUNNER_TEMP/packages"
+            VERSION="$version" bash packaging/linux/validate.sh "$RUNNER_TEMP/packages"
           done
-          sudo systemctl is-active --quiet "$unit"
-          sudo journalctl -u "$unit" --no-pager | grep -q 'dscd started'
-          sudo systemctl stop "$unit"
-          sudo journalctl -u "$unit" --no-pager | grep -q 'dscd stopped'
+      - name: Debian package lifecycle with real systemd
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --output "$RUNNER_TEMP/dsc.deb" \
+            https://github.com/PowerShell/DSC/releases/download/v3.3.0/dsc_3.3.0-1_amd64.deb
+          echo "af949cd0dd27a573fd74c926edf57b9d2136063f361f11af88738e2df32487c8  $RUNNER_TEMP/dsc.deb" | sha256sum --check
+          sudo apt-get install -y "$RUNNER_TEMP/dsc.deb"
+          sudo bash packaging/linux/test-install.sh \
+            "$RUNNER_TEMP/packages/dscd_0.0.0~rc.1_amd64.deb" \
+            "$RUNNER_TEMP/packages/dscd_0.0.0_amd64.deb"
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: linux-install-packages
+          path: ${{ runner.temp }}/packages/*.rpm
+          if-no-files-found: error
+
+  rpm-install:
+    needs: service
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-install-packages
+          path: ${{ runner.temp }}/packages
+      - name: RPM package lifecycle without systemd (image construction)
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --output "$RUNNER_TEMP/packages/dsc.rpm" \
+            https://github.com/PowerShell/DSC/releases/download/v3.3.0/dsc-3.3.0-1.x86_64.rpm
+          echo "09ac4c3c5aeaaec96cdb128a2fe55cd022a31b5ae67d0c77d01e241761708c47  $RUNNER_TEMP/packages/dsc.rpm" | sha256sum --check
+          docker run --rm \
+            -v "$RUNNER_TEMP/packages:/packages:ro" \
+            -v "$GITHUB_WORKSPACE/packaging/linux:/tests:ro" \
+            fedora:43 bash -euc '
+              dnf install -y /packages/dsc.rpm
+              bash /tests/test-install.sh \
+                /packages/dscd-0.0.0~rc.1-1.x86_64.rpm \
+                /packages/dscd-0.0.0-1.x86_64.rpm
+            '
