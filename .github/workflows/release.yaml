@@ -124,6 +124,8 @@ jobs:
       - name: Build and inspect native Linux packages
         if: runner.os == 'Linux'
         shell: bash
+        env:
+          VERSION: ${{ env.RELEASE_VERSION }}
         run: |
           bash packaging/linux/build.sh "$RUNNER_TEMP/release-dist"
           bash packaging/linux/validate.sh "$RUNNER_TEMP/release-dist"
