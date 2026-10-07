@@ -14,7 +14,7 @@ function Assert([bool] $Condition, [string] $Message) {
 function Rows([string] $Sql, [string[]] $Columns) {
     $view = $database.OpenView($Sql)
     try {
-        $view.Execute()
+        [void]$view.Execute()
         while ($record = $view.Fetch()) {
             try {
                 $row = @{}
@@ -27,7 +27,7 @@ function Rows([string] $Sql, [string[]] $Columns) {
         }
     }
     finally {
-        $view.Close()
+        [void]$view.Close()
         [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($view)
     }
 }
@@ -134,6 +134,9 @@ try {
         Assert (([int]$action.Type -band 63) -eq 51 -or $action.Target -in @('SchedServiceConfig', 'ExecServiceConfig', 'RollbackServiceConfig')) "unexpected custom action $($action.Name)"
     }
     Write-Output "MSI metadata, contents, service, recovery, Event Log, and ACL inspection passed: $MsiPath"
+}
+catch {
+    throw "MSI inspection failed: $($_.Exception.Message)`n$($_.ScriptStackTrace)"
 }
 finally {
     [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($database)
