@@ -513,6 +513,12 @@ version or resource compatibility. Operators must verify version and provision
 LocalSystem access to DSC/resources, with no untrusted write access.
 Interactive user PATH and per-user executable aliases are never consulted.
 The installer neither bundles nor downloads DSC.
+MSI's native directory locator rejects `..` path segments, so a small native
+DLL action derives the canonical parent of an explicit `DSC_PATH` before
+AppSearch. It only reads/sets MSI properties, performs no machine changes and
+does not execute DSC; the native file signature and launch conditions still
+validate the prerequisite. Service, registry, directory and ACL operations
+remain declarative.
 
 Native service tables own `dscd`, display name `DSC Reconciliation Daemon`,
 automatic startup and LocalSystem identity. The command line supplies only
@@ -554,6 +560,9 @@ marked pre-release, even when a stable-form tag is selected.
 
 WiX Toolset 7.0.0 is pinned for builds; no Go source compilation happens inside
 the installer project. The packaging build accepts a previously built executable.
+Building the prerequisite-path DLL requires Visual Studio x64 C++ build tools
+and the Windows SDK, present on the hosted Windows runner. It statically links
+the C runtime; these build tools are not needed on installation targets.
 Go's unversioned PE receives release-version and language-neutral MSI file
 metadata to ensure upgrade replacement; that intentional override's warning
 is also suppressed. All other WiX warnings fail the build.

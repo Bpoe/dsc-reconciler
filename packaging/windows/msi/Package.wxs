@@ -15,11 +15,18 @@
     <SetProperty Id="EXPLICIT_DSC_PATH" Value="[DSC_PATH]" Before="AppSearch"
                  Condition="DSC_PATH" />
     <Property Id="DSC_SEARCH_DIR" Secure="yes" />
-    <SetProperty Id="DSC_SEARCH_DIR" Value="[DSC_PATH]\.." Before="AppSearch"
-                 Condition="DSC_PATH" />
+    <Binary Id="SearchDirectoryHelper" SourceFile="$(var.SearchHelperPath)" />
+    <CustomAction Id="PrepareDSCSearchDirectory" BinaryRef="SearchDirectoryHelper"
+                  DllEntry="PrepareDSCSearchDirectory" Execute="immediate" Return="check" />
+    <InstallUISequence>
+      <Custom Action="PrepareDSCSearchDirectory" Before="AppSearch" Condition="DSC_PATH" />
+    </InstallUISequence>
+    <InstallExecuteSequence>
+      <Custom Action="PrepareDSCSearchDirectory" Before="AppSearch" Condition="DSC_PATH" />
+    </InstallExecuteSequence>
 
-    <!-- Searches never consult PATH or a user registry hive. The \.. suffix is
-         normalized by Windows to the executable's parent directory. The launch
+    <!-- Searches never consult PATH or a user registry hive. The helper derives
+         the canonical parent directory without modifying the system. The launch
          condition requires an absolute drive path ending in \dsc.exe. -->
     <Property Id="EXPLICIT_DSC" Secure="yes">
       <DirectorySearch Id="ExplicitDSCDirectory" Path="[DSC_SEARCH_DIR]" Depth="0">

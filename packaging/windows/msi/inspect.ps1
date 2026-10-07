@@ -124,14 +124,14 @@ try {
     }
     Assert (@($registry | Where-Object { $_.Root -eq '2' -and $_.Key -eq 'Software\dsc-reconciler\dscd' -and $_.Name -eq 'DSC_PATH' -and $_.Value -eq '[DSC_PATH]' }).Count -eq 1) 'persisted DSC path'
     $actions = @(Rows 'SELECT `Action`, `Type`, `Target` FROM `CustomAction`' @('Name', 'Type', 'Target'))
-    $searchInitializer = @($actions | Where-Object Name -eq 'SetDSC_SEARCH_DIR')
-    Assert ($searchInitializer.Count -eq 1 -and ([int]$searchInitializer[0].Type -band 63) -eq 51 -and
-        $searchInitializer[0].Target -ceq '[DSC_PATH]\..') 'native search-directory property initialization'
-    $searchInitialization = [int]($sequence | Where-Object Action -eq 'SetDSC_SEARCH_DIR').Sequence
+    $searchInitializer = @($actions | Where-Object Name -eq 'PrepareDSCSearchDirectory')
+    Assert ($searchInitializer.Count -eq 1 -and ([int]$searchInitializer[0].Type -band 63) -eq 1 -and
+        $searchInitializer[0].Target -ceq 'PrepareDSCSearchDirectory') 'native canonical search-directory property initialization'
+    $searchInitialization = [int]($sequence | Where-Object Action -eq 'PrepareDSCSearchDirectory').Sequence
     $appSearch = [int]($sequence | Where-Object Action -eq 'AppSearch').Sequence
     Assert ($searchInitialization -gt 0 -and $searchInitialization -lt $appSearch) 'DSC parent directory initialized before AppSearch'
     foreach ($action in $actions) {
-        Assert (([int]$action.Type -band 63) -eq 51 -or $action.Target -in @('SchedServiceConfig', 'ExecServiceConfig', 'RollbackServiceConfig')) "unexpected custom action $($action.Name)"
+        Assert (([int]$action.Type -band 63) -eq 51 -or $action.Target -in @('PrepareDSCSearchDirectory', 'SchedServiceConfig', 'ExecServiceConfig', 'RollbackServiceConfig')) "unexpected custom action $($action.Name)"
     }
     Write-Output "MSI metadata, contents, service, recovery, Event Log, and ACL inspection passed: $MsiPath"
 }

@@ -33,10 +33,22 @@ try {
 finally { $reader.Dispose() }
 $output = [IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Path $output -Force | Out-Null
+$nativeDirectory = Join-Path $PSScriptRoot "obj/Release/$Version/native"
+New-Item -ItemType Directory -Path $nativeDirectory -Force | Out-Null
+$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+$visualStudio = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+if (-not $visualStudio) { throw 'Building the native MSI path helper requires Visual Studio x64 C++ build tools.' }
+Import-Module (Join-Path $visualStudio 'Common7/Tools/Microsoft.VisualStudio.DevShell.dll')
+Enter-VsDevShell -VsInstallPath $visualStudio -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+$searchHelper = Join-Path $nativeDirectory 'search-directory.dll'
+& cl.exe /nologo /LD /W4 /WX /O2 /MT "$PSScriptRoot/search-directory.c" `
+    "/Fo$nativeDirectory/" "/Fe$searchHelper" /link msi.lib "/IMPLIB:$nativeDirectory/search-directory.lib"
+if ($LASTEXITCODE -ne 0) { throw "Native MSI path helper build failed: $LASTEXITCODE" }
 # Isolate each release's clean/build tracking so rebuilding an upgrade package
 # does not delete the earlier MSI from a shared output directory.
 dotnet build "$PSScriptRoot/dscd.wixproj" --configuration Release --nologo --no-incremental `
     "-p:ReleaseVersion=$Version" "-p:ProductVersion=$productVersion" "-p:BinaryPath=$binary" `
+    "-p:SearchHelperPath=$searchHelper" `
     "-p:IntermediateOutputPath=obj/Release/$Version/" `
     "-p:OutputPath=$output/" "-p:AcceptEula=wix7"
 if ($LASTEXITCODE -ne 0) { throw "WiX build failed: $LASTEXITCODE" }
