@@ -32,3 +32,23 @@ __declspec(dllexport) UINT __stdcall PrepareDSCSearchDirectory(MSIHANDLE install
         return ERROR_SUCCESS;
     return MsiSetPropertyW(install, L"DSC_SEARCH_DIR", directory);
 }
+
+/* RegLocator's file search also rejects "." segments in a saved absolute path.
+   Verify the unchanged saved selection with the Windows filesystem API. */
+__declspec(dllexport) UINT __stdcall CheckSavedDSCPath(MSIHANDLE install)
+{
+    WCHAR executable[32768];
+    DWORD length = ARRAYSIZE(executable), attributes;
+    UINT status = MsiSetPropertyW(install, L"SAVED_DSC_EXISTS", L"");
+    if (status != ERROR_SUCCESS)
+        return status;
+    status = MsiGetPropertyW(install, L"SAVED_DSC", executable, &length);
+    if (status == ERROR_MORE_DATA)
+        return ERROR_SUCCESS;
+    if (status != ERROR_SUCCESS)
+        return status;
+    attributes = GetFileAttributesW(executable);
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY))
+        return ERROR_SUCCESS;
+    return MsiSetPropertyW(install, L"SAVED_DSC_EXISTS", L"1");
+}

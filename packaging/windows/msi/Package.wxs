@@ -18,11 +18,15 @@
     <Binary Id="SearchDirectoryHelper" SourceFile="$(var.SearchHelperPath)" />
     <CustomAction Id="PrepareDSCSearchDirectory" BinaryRef="SearchDirectoryHelper"
                   DllEntry="PrepareDSCSearchDirectory" Execute="immediate" Return="check" />
+    <CustomAction Id="CheckSavedDSCPath" BinaryRef="SearchDirectoryHelper"
+                  DllEntry="CheckSavedDSCPath" Execute="immediate" Return="check" />
     <InstallUISequence>
       <Custom Action="PrepareDSCSearchDirectory" Before="AppSearch" Condition="DSC_PATH" />
+      <Custom Action="CheckSavedDSCPath" After="AppSearch" Condition="SAVED_DSC AND NOT DSC_PATH" />
     </InstallUISequence>
     <InstallExecuteSequence>
       <Custom Action="PrepareDSCSearchDirectory" Before="AppSearch" Condition="DSC_PATH" />
+      <Custom Action="CheckSavedDSCPath" After="AppSearch" Condition="SAVED_DSC AND NOT DSC_PATH" />
     </InstallExecuteSequence>
 
     <!-- Searches never consult PATH or a user registry hive. The helper derives
@@ -37,18 +41,13 @@
       <RegistrySearch Id="SavedDSCPath" Root="HKLM" Key="Software\dsc-reconciler\dscd"
                       Name="DSC_PATH" Type="raw" Bitness="always64" />
     </Property>
-    <Property Id="SAVED_DSC_EXISTS" Secure="yes">
-      <RegistrySearch Id="SavedDSCFile" Root="HKLM" Key="Software\dsc-reconciler\dscd"
-                      Name="DSC_PATH" Type="file" Bitness="always64">
-        <FileSearch Id="SavedDSCSignature" Name="dsc.exe" />
-      </RegistrySearch>
-    </Property>
+    <Property Id="SAVED_DSC_EXISTS" Secure="yes" />
     <Property Id="DEFAULT_DSC" Secure="yes">
       <DirectorySearch Id="DefaultDSCDirectory" Path="[ProgramFiles64Folder]DSC" Depth="0">
         <FileSearch Id="DefaultDSCFile" Name="dsc.exe" />
       </DirectorySearch>
     </Property>
-    <SetProperty Id="DSC_PATH" Value="[SAVED_DSC]" After="AppSearch"
+    <SetProperty Id="DSC_PATH" Value="[SAVED_DSC]" After="CheckSavedDSCPath"
                  Action="RestoreDSCPath" Condition="NOT DSC_PATH AND SAVED_DSC" />
     <SetProperty Id="DSC_PATH" Value="[DEFAULT_DSC]" After="RestoreDSCPath"
                  Action="DefaultDSCPath" Condition="NOT DSC_PATH AND NOT SAVED_DSC" />

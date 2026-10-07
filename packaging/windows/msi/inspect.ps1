@@ -130,8 +130,14 @@ try {
     $searchInitialization = [int]($sequence | Where-Object Action -eq 'PrepareDSCSearchDirectory').Sequence
     $appSearch = [int]($sequence | Where-Object Action -eq 'AppSearch').Sequence
     Assert ($searchInitialization -gt 0 -and $searchInitialization -lt $appSearch) 'DSC parent directory initialized before AppSearch'
+    $savedCheck = @($actions | Where-Object Name -eq 'CheckSavedDSCPath')
+    Assert ($savedCheck.Count -eq 1 -and ([int]$savedCheck[0].Type -band 63) -eq 1 -and
+        $savedCheck[0].Target -ceq 'CheckSavedDSCPath') 'saved executable existence check'
+    $savedCheckSequence = [int]($sequence | Where-Object Action -eq 'CheckSavedDSCPath').Sequence
+    $restoreSequence = [int]($sequence | Where-Object Action -eq 'RestoreDSCPath').Sequence
+    Assert ($savedCheckSequence -gt $appSearch -and $savedCheckSequence -lt $restoreSequence) 'saved executable checked before restoring DSC_PATH'
     foreach ($action in $actions) {
-        Assert (([int]$action.Type -band 63) -eq 51 -or $action.Target -in @('PrepareDSCSearchDirectory', 'SchedServiceConfig', 'ExecServiceConfig', 'RollbackServiceConfig')) "unexpected custom action $($action.Name)"
+        Assert (([int]$action.Type -band 63) -eq 51 -or $action.Target -in @('PrepareDSCSearchDirectory', 'CheckSavedDSCPath', 'SchedServiceConfig', 'ExecServiceConfig', 'RollbackServiceConfig')) "unexpected custom action $($action.Name)"
     }
     Write-Output "MSI metadata, contents, service, recovery, Event Log, and ACL inspection passed: $MsiPath"
 }

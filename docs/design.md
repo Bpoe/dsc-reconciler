@@ -515,10 +515,13 @@ Interactive user PATH and per-user executable aliases are never consulted.
 The installer neither bundles nor downloads DSC.
 MSI's native directory locator rejects `..` path segments, so a small native
 DLL action derives the canonical parent of an explicit `DSC_PATH` before
-AppSearch. It only reads/sets MSI properties, performs no machine changes and
-does not execute DSC; the native file signature and launch conditions still
-validate the prerequisite. Service, registry, directory and ACL operations
-remain declarative.
+AppSearch. MSI's registry file locator also rejects `.` segments in saved paths;
+the same DLL checks saved selections with the Windows file-attributes API,
+rejecting missing files and directories while retaining the selected path.
+These actions only read properties/filesystem metadata and set MSI properties;
+they perform no machine changes and do not execute DSC. Native file signatures
+and launch conditions validate explicit/default prerequisites. Service, registry,
+directory and ACL operations remain declarative.
 
 Native service tables own `dscd`, display name `DSC Reconciliation Daemon`,
 automatic startup and LocalSystem identity. The command line supplies only
