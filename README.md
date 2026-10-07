@@ -18,21 +18,21 @@ resource model. DSC owns testing and applying configurations. See the
 ## Prerequisites and compatibility
 
 - Go **1.27.x** to build; no Go installation is needed to run the compiled binary.
-- Microsoft **DSC 3.1.0** and the resources your documents require, installed for
-  the account running the daemon. This is the modern `dsc` CLI, not Windows
+- Microsoft **DSC 3.3.0** with `dsc server` and the resources your documents
+  require, installed for the account running the daemon. This is modern DSC, not Windows
   PowerShell's `Start-DscConfiguration`.
 - Linux with a local filesystem supporting atomic rename and directory fsync
   (systemd for service installation), or Windows 11 / Windows Server 2022 or newer
   with local NTFS. macOS, network shares and FAT are not supported.
 
-Install DSC from the [official release](https://github.com/PowerShell/DSC/releases/tag/v3.1.0).
-The invocation and envelope were verified against the official version-tagged
-[CLI](https://github.com/PowerShell/DSC/blob/v3.1.0/docs/reference/cli/config/set.md)
-and [result](https://github.com/PowerShell/DSC/blob/v3.1.0/docs/reference/schemas/outputs/config/set.md)
-references. An opt-in Echo smoke test also exercised DSC `3.2.0-preview.14`;
-this does not certify all resources or that release.
-Other releases may work if they preserve that contract, but are not certified.
-The daemon does not check or pin the installed version at runtime.
+Install DSC from the [official release](https://github.com/PowerShell/DSC/releases/tag/v3.3.0).
+The stdio protocol follows DSC's version-tagged
+[server tests](https://github.com/PowerShell/DSC/blob/v3.3.0/dsc/tests/dsc_server.tests.ps1)
+and [configuration tool](https://github.com/PowerShell/DSC/blob/v3.3.0/dsc/src/server/invoke_dsc_config.rs).
+Server mode is available in stable DSC 3.3.0; a preview release is not required.
+An opt-in Echo test exercised 3.3.0 on Windows; this does not certify all
+resources. Older CLI-only DSC versions, including `3.2.0-preview.14`, are no longer
+supported. There is no per-document process fallback.
 
 The sole Go dependency, `golang.org/x/sys`, provides Windows Job Objects, SCM,
 Event Log, ACLs and native file replacement. Linux uses the standard library.
@@ -82,11 +82,11 @@ in GitHub, select **Actions > service-integration > Run workflow**.
 `packaging\windows\test-service.ps1` is a separate, **administrator-only,
 opt-in** SCM integration check; never run it on a production machine.
 
-To explicitly run the real DSC parameter-file tests, install `Microsoft.DSC.Debug/Echo`
+To explicitly run the real DSC server tests, install `Microsoft.DSC.Debug/Echo`
 and set `DSCD_TEST_DSC_PATH` for that test process:
 
 ```powershell
-$env:DSCD_TEST_DSC_PATH = 'C:\path\to\dsc.exe'
+$env:DSCD_TEST_DSC_PATH = 'C:\bin\dsc\dsc.exe' # Adjust to your DSC 3.3.0 installation.
 go test ./internal/dsc -run TestRealDSCParameterFiles -count=1 -v
 Remove-Item Env:\DSCD_TEST_DSC_PATH
 ```
@@ -161,7 +161,7 @@ exceeding the 30-second shutdown bound exits nonzero.
 | `-results-dir` | Linux `/var/lib/dsc/results.d`; Windows `%ProgramData%\dsc\results.d` | Results directory, privately created if absent. |
 | `-dsc-path` | `dsc` | Executable path or name, resolved once at startup through PATH/PATHEXT. |
 | `-interval` | `5m` | Positive delay after each completed reconciliation pass. |
-| `-execution-timeout` | `15m` | Positive per-document timeout. Later documents continue after a timeout. |
+| `-execution-timeout` | `15m` | Positive per-configuration JSON-RPC request timeout. Later documents continue on a fresh server after a timeout. |
 
 Use `-help` for flags. There are no subcommands, daemon configuration files or
 daemon environment overrides. The OS `ProgramData` variable selects Windows'
@@ -177,6 +177,18 @@ such as `.yaml.tmp` are ignored. Go string ordering puts
 are reapplied because machine state may drift. Reconcile immediately on startup,
 then wait the full interval after each completed pass before starting the next.
 Passes never overlap, and slow passes do not cause catch-up runs.
+
+Each pass normally starts **one short-lived `dsc server`**, initializes its
+MCP/JSON-RPC stdio session, and uses `invoke_dsc_config` to apply each configuration
+sequentially. The server is closed before the pass ends; DSC is not kept alive
+during the interval. Empty directories start no server. Input errors do not
+require starting a server.
+
+Ordinary DSC errors fail that input but retain the same session. Server crashes,
+timeouts and invalid protocol responses destroy the current session; the next
+configuration starts a fresh one. This restart is fault recovery, not a retry of
+the failed input. Server startup/initialization failure publishes failures for
+remaining readable inputs, reports a pass-level error and retries next pass.
 
 `*.parameters.yaml` and `*.parameters.json` are reserved sidecars, never standalone
 configurations. Match by the configuration filename without its final extension:
@@ -194,16 +206,31 @@ receive failed input results and unrelated configurations continue. Orphan
 sidecars are ignored. Missing/unreadable or nonregular selected sidecars fail
 rather than silently falling back to parameter defaults.
 
-DSC owns parsing, validation, defaults, substitution and secure values.
-`dscd` does not inspect or merge either file. It passes the sidecar using
-`dsc config --parameters-file <sidecar> set --file <configuration> --output-format json`.
-As before, DSC's `set` operation handles testing and applying changes itself.
+DSC owns parsing, validation, resource discovery, parameter interpretation,
+defaults, substitution, secure values and execution. `dscd` does not inspect
+individual resources or merge either input. It sends the captured configuration
+and optional sidecar text inline through `invoke_dsc_config(operation: "set")`;
+DSC handles testing and applying changes.
+
+**Migration from CLI parameter files:** the server tool expects a direct mapping:
+
+```yaml
+# web.parameters.yaml
+message: Hello from parameters
+```
+
+JSON `{"message":"Hello from parameters"}` is equally valid. Do **not** use the
+CLI's outer `parameters:` wrapper with this server. `dscd` deliberately sends the
+sidecar unchanged rather than parsing or translating it.
 
 Producers must be trusted and publish complete documents by temporary-file
-replacement, not in-place editing. The daemon rechecks and hashes both files
-before execution, but the observed hash is not an immutable snapshot: DSC may
-read newer bytes if paths change afterward. There is no protection against
-malicious path replacement.
+replacement, not in-place editing. The daemon opens each input once per attempt,
+captures its UTF-8 text, hashes that snapshot, and sends the same text to DSC.
+DSC never reopens the input paths: **bytes hashed equal bytes submitted**.
+Replacing either source after capture does not affect that attempt. Capturing a
+pair is not an atomic producer transaction; producers still coordinate updates.
+Inline inputs do not provide the CLI's implicit file-root/`DSC_CONFIG_ROOT`
+context; documents must not rely on it.
 Keep executable/resource directories and input/output parents non-writable by
 untrusted users. Service working directories and environments differ from a
 console; install resources for the service identity and do not rely on a user's
@@ -218,9 +245,10 @@ results or undo machine changes.
 
 Every published result retains the ten fields below, including explicit nulls.
 Two additive fields are included when available: `parameters` is the sidecar
-basename, and `inputHash` is the combined SHA-256 identity of the observed input
+basename, and `inputHash` is the combined SHA-256 identity of the exact submitted
 bytes. Changing only the parameter file changes the identity; an absent and an
-empty sidecar differ. Ambiguous or unreadable inputs have no hash.
+empty sidecar differ. Ambiguous or unreadable inputs have no hash. Startup failures
+can retain the captured hash even though submission could not occur.
 
 ```json
 {
@@ -230,7 +258,7 @@ empty sidecar differ. Ambiguous or unreadable inputs have no hash.
   "finishedAt": "2026-10-05T18:00:01Z",
   "durationMs": 1000,
   "outcome": "succeeded",
-  "exitCode": 0,
+  "exitCode": null,
   "dscResult": {"metadata": {}, "results": [], "messages": [], "hadErrors": false},
   "error": null,
   "stderr": ""
@@ -239,17 +267,24 @@ empty sidecar differ. Ambiguous or unreadable inputs have no hash.
 
 This is an illustrative envelope, not a recorded DSC execution. Outcomes are
 `succeeded`, `failed`, or `canceled`; failure objects contain `kind` and `message`.
-Success requires a zero exit and valid DSC envelope with `hadErrors: false`.
+Success requires a successful JSON-RPC response and valid DSC result with `hadErrors: false`.
 Kinds are `input`, `start`, `exit`, `output`, `dsc`, and `canceled`. Timeouts are
-`canceled`; output-cap termination is `output`. Valid DSC payloads are retained
-even on nonzero exits. Unknown nested fields and numeric values are preserved.
+`canceled`; frame/shape/ID errors are `output`. Unknown nested fields and numeric
+values are preserved in `dscResult`. `exitCode` is null for success and normal
+DSC errors; a failed request may record the actual server exit code, including
+forced termination. `stderr` remains present but is empty: a shared server stream
+cannot be reliably attributed to one configuration.
 See the [design](docs/design.md#result-contract) for precedence and field semantics.
 
-Captured stdout is limited to **16 MiB**, stderr to **1 MiB**. Exceeding either
-terminates the process tree and fails the attempt. Truncated stdout is unusable;
-stderr retains a prefix and explicit marker. Pipe draining after parent exit or
-cancellation is limited to two seconds. Background descendants are cleaned up
-after every attempt; resources must use a service manager for persistent services.
+Combined configuration/parameter input is limited to **16 MiB** per attempt.
+Invalid UTF-8 is rejected to avoid changing bytes when encoding JSON strings.
+Each newline-delimited JSON-RPC stdout frame is limited to **16 MiB**; malformed
+or oversized responses fail the attempt and destroy the session. Stderr is always
+drained to a discard sink with fixed buffering; no shared diagnostics accumulate
+or leak into logs/results. Initialization allows up to ten seconds (or the shorter
+execution timeout). At pass completion, close stdin and allow two seconds for
+normal server exit, then terminate if needed. Background descendants are cleaned
+up when the session ends; resources must use a service manager for persistent services.
 Linux uses process groups, plus systemd cgroups when packaged; Windows assigns
 DSC to a kill-on-close Job Object **before** its first instruction executes.
 
@@ -264,8 +299,8 @@ Result files contain potentially sensitive DSC output. New Linux directories
 are `0700` and files `0600`; Windows protects new directories and each file for
 the daemon identity, SYSTEM and administrators. Existing directory permissions
 are left unchanged. Routine logs contain attempt metadata, not raw DSC output.
-Parameter contents are never copied into daemon metadata or logs. Preserved DSC
-output and stderr may still contain values echoed by DSC/resources; `dscd` does
+Input contents are never copied into daemon metadata or logs. Preserved DSC
+results and JSON-RPC error messages may still contain values echoed by DSC/resources; `dscd` does
 not redact them. Keep result access restricted accordingly.
 
 Publication writes, syncs and closes a private temporary file before replacement:
@@ -372,8 +407,9 @@ and the in-memory SCM lifecycle are covered.
 Actual service registration and system shutdown were **not** exercised on this
 shared machine. The manual service-integration workflow provides disposable
 systemd/SCM smoke checks; its presence does not establish a completed run.
-The opt-in Echo test on Windows with DSC `3.2.0-preview.14` passed for YAML/JSON
-configurations with no sidecar and with either parameter format. Other resources,
+The opt-in Echo server test on Windows with DSC `3.3.0` passed for YAML/JSON
+configurations with no sidecar and with either inline parameter format in one
+initialized session. Other resources,
 real DSC execution on Linux, power-loss durability and other CPU architectures
 remain unverified. Linux foreground
 cannot contain descendants that deliberately leave its process group; jobs and

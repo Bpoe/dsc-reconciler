@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -17,15 +18,40 @@ import (
 	"github.com/Bpoe/dsc-reconciler/internal/results"
 )
 
+func TestHashFramingUnchanged(t *testing.T) {
+	in := dsc.Input{Configuration: "a.yaml", Parameters: "a.parameters.json", ConfigurationText: "configuration", ParametersText: "parameters"}
+	config := sha256.Sum256([]byte(in.ConfigurationText))
+	params := sha256.Sum256([]byte(in.ParametersText))
+	bytes := append([]byte("dscd-input-v1\x00"), config[:]...)
+	bytes = append(bytes, 1)
+	bytes = append(bytes, params[:]...)
+	expected := fmt.Sprintf("sha256:%x", sha256.Sum256(bytes))
+	if inputHash(in) != expected {
+		t.Fatal("hash framing changed")
+	}
+}
+
+func TestInputLimitsAndUTF8(t *testing.T) {
+	for _, content := range [][]byte{[]byte{0xff}, []byte("more than four bytes")} {
+		path := filepath.Join(t.TempDir(), "a.yaml")
+		if err := os.WriteFile(path, content, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readInputFile(context.Background(), path, 4); err == nil {
+			t.Fatal("accepted invalid or oversized input")
+		}
+	}
+}
+
 func TestFileHashReadsEntireInput(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "large.parameters.json")
 	data := append(bytes.Repeat([]byte("opaque input"), 10000), '!')
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	sum, err := fileHash(context.Background(), path)
-	if err != nil || sum != sha256.Sum256(data) {
-		t.Fatalf("incomplete streamed input hash: %x (%v)", sum, err)
+	text, err := readInputFile(context.Background(), path, maxInputBytes)
+	if err != nil || text != string(data) {
+		t.Fatalf("incomplete input read: %v", err)
 	}
 }
 
@@ -54,16 +80,18 @@ func TestInputHash(t *testing.T) {
 			}
 			write(in.Configuration, "configuration")
 			write(in.Parameters, "parameters")
-			before, err := inputHash(context.Background(), in)
+			captured, err := readInput(context.Background(), in)
 			if err != nil {
 				t.Fatal(err)
 			}
+			before := inputHash(captured)
 			write(in.Configuration, test.configuration)
 			write(in.Parameters, test.parameters)
 			if !test.present {
 				in.Parameters = ""
 			}
-			after, err := inputHash(context.Background(), in)
+			captured, err = readInput(context.Background(), in)
+			after := inputHash(captured)
 			if err != nil || (before != after) != test.different || len(after) != len("sha256:")+64 {
 				t.Fatalf("before=%q after=%q different=%t err=%v", before, after, test.different, err)
 			}
@@ -81,14 +109,16 @@ func TestInputHashSeparatesFilesAndPresence(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		sum, err := inputHash(context.Background(), in)
+		captured, err := readInput(context.Background(), in)
+		sum := inputHash(captured)
 		if err != nil || seen[sum] {
 			t.Fatalf("ambiguous hash %q: %v", sum, err)
 		}
 		seen[sum] = true
 	}
 	in.Parameters = ""
-	sum, err := inputHash(context.Background(), in)
+	captured, err := readInput(context.Background(), in)
+	sum := inputHash(captured)
 	if err != nil || seen[sum] {
 		t.Fatalf("absent and empty sidecars are indistinguishable: %q (%v)", sum, err)
 	}
@@ -98,15 +128,15 @@ func TestInputHashCancellationAndReadErrors(t *testing.T) {
 	dir := t.TempDir()
 	input(t, dir, "web.yaml")
 	in := dsc.Input{Configuration: filepath.Join(dir, "web.yaml"), Parameters: filepath.Join(dir, "missing.parameters.json")}
-	sum, err := inputHash(context.Background(), in)
-	if sum != "" || !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), "missing.parameters.json") {
-		t.Fatalf("missing parameters: hash=%q err=%v", sum, err)
+	_, err := readInput(context.Background(), in)
+	if !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), "missing.parameters.json") {
+		t.Fatalf("missing parameters: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	sum, err = inputHash(ctx, in)
-	if sum != "" || !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled hash=%q err=%v", sum, err)
+	_, err = readInput(ctx, in)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled input: %v", err)
 	}
 	result := dsc.InputFailure(in, err)
 	if result.Outcome != "canceled" || result.Error.Kind != "canceled" {
@@ -131,7 +161,7 @@ func TestParameterMetadataAndRediscovery(t *testing.T) {
 		}
 		return dsc.Result{SchemaVersion: 1, Configuration: filepath.Base(in.Configuration), Parameters: parameters, Outcome: "succeeded"}
 	}}
-	r := New(dir, time.Second, client, writer, slog.New(slog.NewJSONHandler(&logs, nil)))
+	r := New(dir, time.Second, client.start, writer, slog.New(slog.NewJSONHandler(&logs, nil)))
 	readResult := func() dsc.Result {
 		t.Helper()
 		if err := r.Pass(context.Background()); err != nil {

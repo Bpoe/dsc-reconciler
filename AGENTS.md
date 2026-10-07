@@ -72,8 +72,8 @@ or a generic project-layout directory collection. See Go's
 | --- | --- |
 | `cmd/dscd` | Dependency wiring, logging setup, signals, lifecycle, and exit status. |
 | `internal/config` | Typed daemon options, flag parsing, defaults, and validation. |
-| `internal/dsc` | DSC arguments, process execution, output capture, and execution-result types. |
-| `internal/reconcile` | Discovery, ordering, the periodic loop, and coordinating execution with result publication. |
+| `internal/dsc` | Pass-scoped DSC server processes, MCP initialization, JSON-RPC framing, request timeouts, and execution-result types. |
+| `internal/reconcile` | Discovery, ordering, input snapshots/hashing, the periodic loop, and coordinating execution with result publication. |
 | `internal/results` | Result serialization, destination naming, permissions, and safe file replacement. |
 
 Keep `main` boring: load config, create the DSC client and result writer, create
@@ -90,11 +90,20 @@ the writer does not invoke DSC or schedule work.
 DSC owns document parsing, validation, resource semantics, and execution. Treat
 configuration documents and parameter sidecars as opaque inputs. Associate
 `.parameters.yaml` and `.parameters.json` files by basename, reject ambiguous
-basenames, and never reconcile sidecars independently. Hash both inputs without
-parsing them; the hash is observational rather than a snapshot or skip key.
+basenames, and never reconcile sidecars independently. Read each input once,
+hash the captured UTF-8 strings using the existing framing, and submit exactly
+those strings to DSC. The hash identifies the submitted input, not a skip key.
 Do not introduce a YAML parser to
 inspect files DSC can consume. Parsing DSC execution output is a separate,
 necessary boundary responsibility; it does not justify modeling DSC resources.
+
+Start one short-lived `dsc server` per nonempty executable pass, initialize MCP
+and submit configurations sequentially with `invoke_dsc_config`. Close and reap
+the server before waiting for the next pass. Restart within a pass only after a
+server/protocol failure or request timeout; ordinary DSC errors retain the session.
+Do not keep DSC alive between passes, introduce an MCP SDK, or interpret resource
+state. Server sidecars are direct parameter mappings, not CLI-wrapped envelopes;
+the daemon passes them unchanged.
 
 ## Go conventions
 
@@ -162,14 +171,17 @@ Prioritize observable behavior:
 - Continued processing after a document failure and publication of failure results.
 - Immediate first reconciliation, a full interval after each completed pass,
   no catch-up or overlapping passes, and prompt cancellation during the wait.
-- DSC argument passing, separate stdout/stderr, and execution/output errors.
+- MCP handshake, inline requests and exact input hashes, response IDs and framing,
+  session reuse/recovery, bounded shutdown and descendant cleanup.
 - Valid result JSON, filename mapping, complete replacement, publication failures,
   and temporary-file cleanup.
 
-The DSC compatibility target is 3.1.0, using the version-tagged official CLI and
-set-result references linked in the design. Keep the 16 MiB stdout / 1 MiB stderr
-limits effective through `io.Copy` fast paths; do not embed an unbounded buffer
-that exposes `ReadFrom`. Windows must attach the suspended process to a
+The DSC server compatibility target is stable 3.3.0, using the version-tagged
+official server tests and implementation linked in the design. Keep input snapshots
+bounded to 16 MiB combined and stdout JSON-RPC frames to 16 MiB. Drain shared stderr
+without retaining it; per-attempt `stderr` stays empty and RPC-success `exitCode`
+stays null. Never log RPC error text which may contain secrets.
+Windows must attach the suspended process to a
 kill-on-close job before resuming it. Linux must kill the entire process group.
 Use native `FileRenameInfoEx` replacement on Windows, not portable `os.Rename`
 or a remove-then-rename sequence. Keep Windows power-loss durability claims

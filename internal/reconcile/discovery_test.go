@@ -50,8 +50,12 @@ func TestParameterAssociation(t *testing.T) {
 				return dsc.Result{Configuration: filepath.Base(in.Configuration), Outcome: "succeeded"}
 			}}
 			writer := &fakeWriter{}
-			if err := New(dir, time.Second, client, writer, logger()).Pass(context.Background()); err != nil {
+			if err := New(dir, time.Second, client.start, writer, logger()).Pass(context.Background()); err != nil {
 				t.Fatal(err)
+			}
+			want.ConfigurationText = "opaque document"
+			if want.Parameters != "" {
+				want.ParametersText = "opaque document"
 			}
 			if !reflect.DeepEqual(calls, []dsc.Input{want}) || len(writer.results) != 1 || writer.results[0].InputHash == "" {
 				t.Fatalf("calls = %+v, results = %+v", calls, writer.results)
@@ -122,7 +126,7 @@ func TestAmbiguousInputs(t *testing.T) {
 				return dsc.Result{Configuration: name, Outcome: "succeeded"}
 			}}
 			writer := &fakeWriter{}
-			if err := New(dir, time.Second, client, writer, logger()).Pass(context.Background()); err != nil {
+			if err := New(dir, time.Second, client.start, writer, logger()).Pass(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			if !reflect.DeepEqual(calls, []string{"z-unrelated.yaml"}) || len(writer.results) != test.failures+1 {
@@ -155,7 +159,7 @@ func TestParameterDisappearsBeforeExecution(t *testing.T) {
 		return dsc.Result{Configuration: name, Outcome: "succeeded"}
 	}}
 	writer := &fakeWriter{}
-	if err := New(dir, time.Second, client, writer, logger()).Pass(context.Background()); err != nil {
+	if err := New(dir, time.Second, client.start, writer, logger()).Pass(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(calls, []string{"10-first.yaml", "30-last.json"}) || len(writer.results) != 3 {
@@ -188,7 +192,7 @@ func TestNonregularParameterIsNotIgnored(t *testing.T) {
 				return dsc.Result{}
 			}}
 			writer := &fakeWriter{}
-			if err := New(dir, time.Second, client, writer, logger()).Pass(context.Background()); err != nil {
+			if err := New(dir, time.Second, client.start, writer, logger()).Pass(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			if len(writer.results) != 1 || writer.results[0].Error == nil ||

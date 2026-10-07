@@ -9,10 +9,22 @@ import (
 	"time"
 )
 
-// Input identifies an opaque configuration and its optional parameter file by path.
+// Input holds source identity and immutable UTF-8 text captured by the reconciler.
+// Paths identify inputs; the server receives only ConfigurationText and ParametersText.
 type Input struct {
-	Configuration string
-	Parameters    string
+	Configuration     string
+	Parameters        string
+	ConfigurationText string
+	ParametersText    string
+}
+
+// StartFailure records an input which could not execute because server startup failed.
+func StartFailure(input Input, err error) Result {
+	r := InputFailure(input, err)
+	if r.Outcome != "canceled" {
+		r.Error.Kind = "start"
+	}
+	return r
 }
 
 // Failure classifies an unsuccessful attempt. Messages are not a stable interface.
@@ -22,6 +34,8 @@ type Failure struct {
 }
 
 // Result is the version 1 latest-attempt contract. Nullable fields are always emitted.
+// ExitCode is only available when the server exited during a failed request.
+// Stderr is empty because the shared server stream cannot be attributed to an attempt.
 type Result struct {
 	SchemaVersion int             `json:"schemaVersion"`
 	Configuration string          `json:"configuration"`

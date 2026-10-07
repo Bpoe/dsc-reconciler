@@ -55,11 +55,12 @@ The repository layout and coding rules are in [AGENTS.md](../AGENTS.md).
 | Daemon entry point | Load options, configure logging, connect components, establish cancellation, report process exit. | No discovery or DSC outcome logic. |
 | Configuration loader | Typed daemon options and validation. | No DSC document parsing. |
 | Reconciliation loop | Discover and sort documents; coordinate periodic execution and publication. | No process construction or file replacement mechanics. |
-| DSC client | Construct and run DSC commands; capture output; produce an execution result. | No scheduling or result-file writes. |
+| DSC client | Own pass-scoped DSC servers, MCP initialization and serial JSON-RPC requests; produce execution results. | No discovery, input reads/hashing or result-file writes. |
 | Result writer | Encode the result contract and publish files safely. | No DSC invocation or resource-state interpretation. |
 
-The loop supplies a document path and cancellation context to the DSC client,
-then gives its execution result to the writer. Execution and publication have
+The loop supplies captured configuration/parameter strings, source identity and
+a cancellation context to a DSC session, then gives its result to the writer.
+Execution and publication have
 separate errors. A result remains useful on execution failure: its source
 identity, timestamps, and diagnostics must still be populated.
 
@@ -73,7 +74,7 @@ The initial configuration uses the standard `flag` package:
 | `-results-dir` | `ResultsDir` | Linux: `/var/lib/dsc/results.d`; Windows: `%ProgramData%\dsc\results.d` | Directory containing latest execution results. |
 | `-interval` | `Interval` | `5m` | Delay after each completed reconciliation pass; must be positive. |
 | `-dsc-path` | `DSCPath` | `dsc` | Executable path or name to resolve at startup using PATH (and PATHEXT on Windows). |
-| `-execution-timeout` | `ExecutionTimeout` | `15m` | Positive maximum duration per document, including process/output handling. |
+| `-execution-timeout` | `ExecutionTimeout` | `15m` | Positive maximum duration of each configuration JSON-RPC request. |
 
 ```sh
 dscd -config-dir /etc/dsc/config.d -results-dir /var/lib/dsc/results.d -interval 5m -dsc-path dsc
@@ -134,13 +135,20 @@ unreadable file is an input failure, not permission to silently use defaults.
 
 Each pass uses that ordered list and runs one document at a time. Recheck that a
 configuration and selected sidecar are still readable regular files before
-execution; if either disappeared
-or became unreadable, record an input failure and continue. This is operational
+reading them once into memory; if either disappeared or became unreadable,
+record an input failure and continue. This is operational
 validation, not a security boundary against a malicious local writer. Trusted
 producers must publish using temporary files and replacement, not in-place edits.
 
+`dscd` remains the long-running daemon. Each nonempty pass normally uses one
+short-lived `dsc server`, started lazily before its first executable configuration.
+All configurations in that pass share its initialized session and are submitted
+sequentially. Empty passes, or passes with only invalid/unreadable inputs, start no
+server. The session is always closed before the pass returns. DSC is never kept
+running while `dscd` waits between passes.
+
 Reconcile immediately on startup. After each pass completes, including all result
-publication attempts, wait the full configured interval before starting the next
+publication attempts and server shutdown, wait the full configured interval before starting the next
 pass. Pass-level failures use the same delay before retrying. Slow passes never
 cause catch-up runs: a 12-minute pass with a five-minute interval starts its next
 pass 17 minutes after the previous start. There is exactly one active pass and
@@ -149,7 +157,10 @@ the wait and prevents further passes.
 
 ```text
 validate startup
-run one pass immediately
+run one pass immediately:
+    discover and sort configurations
+    capture each input, start server if needed, submit sequentially, publish results
+    close the server
 until canceled:
     wait the full interval after pass completion, or stop on cancellation
     if not canceled: run one pass
@@ -169,73 +180,87 @@ files remain until a producer or operator removes them. They are historical
 evidence of a last attempt, not proof that the corresponding input still exists.
 Renaming a document creates a new identity and leaves the old result behind.
 
-## DSC invocation and outcome
+## DSC server transport and outcome
 
-The initial invocation is equivalent to:
+The compatibility target is **Microsoft DSC 3.3.0**, the stable release with
+`dsc server` and `invoke_dsc_config`; a preview release is not required.
+Older CLI-only versions are not supported and there is
+no per-document CLI fallback. The contract follows DSC's version-tagged
+[server tests](https://github.com/PowerShell/DSC/blob/v3.3.0/dsc/tests/dsc_server.tests.ps1)
+and [configuration tool implementation](https://github.com/PowerShell/DSC/blob/v3.3.0/dsc/src/server/invoke_dsc_config.rs).
+Real DSC execution remains opt-in; other versions require this same protocol.
 
-```sh
-dsc config set --file /absolute/path/to/document.yaml --output-format json
-```
+Start the resolved executable as `dsc server`, without a shell. Stdin/stdout carry
+newline-delimited JSON-RPC 2.0. Initialize with request ID 1, protocol version
+`2024-11-05`, `capabilities: {"tools": {}}`, and client information
+`{"name": "dscd", "version": "dev"}`. Require matching protocol, server information
+and tool capabilities, then send `notifications/initialized` without an ID.
+Initialization is bounded by the smaller of ten seconds and the execution timeout.
 
-With a sidecar, use DSC's configuration-level parameter option before `set`:
+Each configuration sends one `tools/call` request naming `invoke_dsc_config`,
+with arguments `operation: "set"`, `configuration: "<captured text>"`, and
+`parameters: "<captured text>"` only when a sidecar exists. IDs increase within
+each session, starting configuration requests at 2. Only one request is outstanding.
+Validate JSON-RPC version, response shape and exact ID. Ignore well-formed
+notifications without IDs and tolerate additive fields. Malformed/truncated JSON,
+unexpected requests or response shapes, mismatched IDs and pipe failures make
+the session unusable.
 
-```sh
-dsc config --parameters-file /absolute/path/to/document.parameters.json set --file /absolute/path/to/document.yaml --output-format json
-```
+The nested `response.result.structuredContent.result` object is preserved as
+`dscResult`. A well-formed JSON-RPC error or MCP `isError: true` is a configuration
+failure, not a transport failure. Its useful diagnostic text is saved in the
+protected result but never logged. A valid result with `hadErrors: true` is also
+a configuration failure. These outcomes do not restart the server.
 
-Pass arguments directly through `os/exec`, without a shell. Use the resolved
-executable and an absolute input path. Capture stdout and stderr separately.
-The compatibility target is **Microsoft DSC 3.1.0**, not Windows PowerShell DSC.
-The invocation and required output fields were verified against the official
-version-tagged [CLI reference](https://github.com/PowerShell/DSC/blob/v3.1.0/docs/reference/cli/config/set.md),
-[parameter option reference](https://github.com/PowerShell/DSC/blob/v3.1.0/docs/reference/cli/config/index.md#-f---parameters-file)
-and [set-result reference](https://github.com/PowerShell/DSC/blob/v3.1.0/docs/reference/schemas/outputs/config/set.md).
-The daemon does not invoke `--version` or enforce a version-string match at
-startup. Other v3 releases are compatible only if they preserve those arguments,
-the required envelope, and process/resource behavior; they are not automatically
-certified. Normal tests use a synthetic fixture of the documented envelope.
-Real DSC/resource execution remains an explicit opt-in deployment check.
-
-Use `config set` directly because DSC documents that this operation validates
-the input, tests resources, and applies changes where needed. A separate
-daemon-managed test/set sequence would duplicate that responsibility. The same
-parameters are supplied to DSC's test-and-apply flow. An operator invoking an
-explicit test uses `dsc config --parameters-file <path> test --file <path>`;
-the daemon does not introduce a second process or interpret compliance itself. Force JSON
-output explicitly. See Microsoft's
-[`dsc config set` reference](https://learn.microsoft.com/en-us/powershell/dsc/reference/cli/config/set?view=dsc-3.0).
+On process exit, protocol/pipe failure or request timeout, terminate and reap
+the unusable server, publish the current attempt, and start a fresh session for
+the next configuration. Restarting inside a pass is fault recovery only; do not
+retry the failed input within that pass. Cancellation stops further attempts.
+If starting or initializing a session fails, publish `start` failures for the
+remaining readable/unambiguous inputs and return one pass-level error. Do not
+repeatedly attempt startup for every file; retry on the next pass. Discovery/input
+failures still retain their own classification.
 
 Parse only the result envelope needed to assess execution. Require a JSON object
 with object-valued `metadata`, array-valued `results` and `messages`, and a boolean
-`hadErrors`. Preserve its payload without interpreting individual resource properties or
-rejecting unknown fields. Successful execution requires a zero process exit and
-a valid result with `hadErrors: false`. A nonzero exit, reported DSC errors, or
-missing/malformed expected output is a failed attempt. This reports DSC execution
-success, not a permanent compliance guarantee. See the
-[DSC set-result schema](https://learn.microsoft.com/en-us/powershell/dsc/reference/schemas/outputs/config/set?view=dsc-3.0).
+`hadErrors`. Preserve its payload without interpreting individual resource properties
+or rejecting unknown fields. Success means a successful RPC with a valid DSC result
+and `hadErrors: false`, not a per-operation process exit or permanent compliance.
 
-Configuration and parameter contents remain opaque to `dscd`. DSC owns parameter
-parsing, validation, defaults, substitution and secure values. The daemon does
+Configuration and parameter contents remain opaque to `dscd`. DSC owns parsing,
+validation, resource discovery, parameter interpretation, defaults, substitution,
+secure values, testing and configuration execution. The daemon does
 not parse YAML/JSON inputs, merge documents or parameters, interpolate values,
 reinterpret resource identities, or infer dependencies between configurations.
 Two documents that manage conflicting state may continually undo each other;
 document authors must resolve that conflict.
 
+**Parameter-content compatibility:** this server tool expects a direct parameter
+mapping, for example `message: Hello` or `{"message":"Hello"}`, not the CLI
+parameter-file envelope `{"parameters": {...}}`. The daemon sends sidecar text
+unchanged and does not unwrap, merge or translate it. Existing wrapped sidecars
+must be updated by their producers. Empty sidecars are sent as empty strings,
+not silently omitted; DSC decides whether they are valid.
+
 The reconciliation input identity includes both configuration and parameter
-content when a sidecar is present. Before execution, stream both files into
-SHA-256 hashes without retaining their contents. `inputHash` is `sha256:` followed
+content when a sidecar is present. Read each file once per attempt into immutable
+strings, compute the hash from those strings, and submit those exact same strings.
+No input pathname is passed to DSC and DSC never reopens these files. JSON escaping
+does not change the string bytes after decoding: **bytes hashed equal bytes
+submitted**. Reject invalid UTF-8 rather than allowing JSON encoding to replace
+bytes. `inputHash` is `sha256:` followed
 by the lowercase hexadecimal SHA-256 of the concatenation of
 `"dscd-input-v1\0"`, the 32-byte configuration digest, a one-byte sidecar-present
 marker (0 or 1), and, when present, the 32-byte parameter digest. This framing
 distinguishes missing from empty sidecars and keeps file boundaries unambiguous.
 Names are recorded separately; changing either file's bytes changes the hash.
-The hash is observational, not a skip/reconciliation cache key.
-
-The path-based boundary does not bind an attempt to an immutable source revision.
-The hash describes bytes read before execution, not a snapshot: replacement
-between hashing and DSC opening either file may affect the executed bytes, and
-reading a pair is not atomic. Trusted producers must publish complete files.
-Strong revision correlation would require a separate snapshot/input contract.
+The hash identifies the exact desired-state input submitted for an attempt,
+not a skip/reconciliation cache key. For input/start failures it may describe a
+captured input that could not be submitted. Replacing a source file after capture
+cannot change that attempt. Reading a pair is not an atomic producer transaction;
+trusted producers must publish complete files and coordinate paired updates.
+Inline submission also provides no source-path `DSC_CONFIG_ROOT` semantics.
+Documents must not rely on the old CLI's implicit file-root context.
 
 ## Result contract
 
@@ -262,24 +287,25 @@ The initial envelope uses the following fields:
 | `schemaVersion` | integer | `1` for this envelope contract. |
 | `configuration` | string | Exact source basename, including its extension. |
 | `parameters` | optional string | Selected parameter-sidecar basename; omitted when no unique sidecar was selected. Never contains parameter values. |
-| `inputHash` | optional string | Observed combined SHA-256 identity; omitted when ambiguity, unreadable input or cancellation prevents hashing. |
+| `inputHash` | optional string | Combined SHA-256 of the captured strings submitted to DSC; omitted when capture fails. Start failures can retain a hash of input not submitted. |
 | `startedAt` | string | UTC RFC 3339 timestamp with fractional seconds as needed. |
 | `finishedAt` | string | UTC timestamp in the same format. |
 | `durationMs` | integer | Nonnegative elapsed milliseconds, measured with a monotonic clock. |
 | `outcome` | string | `succeeded`, `failed`, or `canceled`. |
-| `exitCode` | integer or null | Actual exit code when available; null if no numeric exit code is available. |
+| `exitCode` | integer or null | Actual server exit code, if available after a fatal request failure/termination. Null for RPC success and ordinary DSC errors; never synthesized as zero. |
 | `dscResult` | object or null | Preserved JSON object from DSC, or null when unavailable/unusable. |
 | `error` | object or null | Failure classification and diagnostic message; null on success. |
-| `stderr` | string | Captured DSC diagnostic output; empty if none. |
+| `stderr` | string | Empty: shared server stderr is drained and discarded, not attributed to individual attempts. |
 
 An error object contains `kind` and `message`. Initial kinds are `input`, `start`,
-`exit`, `output`, `dsc`, and `canceled`. Classify cancellation first, then input or
-start failure, then nonzero exit, then malformed output, then DSC-reported errors.
+`exit`, `output`, `dsc`, and `canceled`. Cancellation/deadline expiry is `canceled`;
+snapshot failures are `input`, startup/handshake failures `start`, unexpected server
+EOF/exit `exit`, framing/ID/shape/pipe failures `output`, and valid RPC/tool/DSC
+errors `dsc`.
 An execution deadline is classified as `canceled` with a deadline diagnostic, but
 does not cancel the daemon or stop later documents. An internal output-limit
-termination is `output`, not `canceled` or the induced nonzero `exit`; only caller
-cancellation or the execution deadline takes precedence over this limit failure.
-Retain an available DSC result even when the process fails. Human-readable error
+termination is `output`, not `canceled` or the induced nonzero `exit`. Initialization
+deadline expiry is also `canceled`. Human-readable error
 messages are diagnostic text, not a stable interface for branching logic.
 
 For example, this complete envelope represents failure to start DSC:
@@ -310,11 +336,19 @@ own envelope timestamps and duration; it preserves DSC's metadata separately in
 `output` error; it is not embedded as a fabricated DSC JSON object or dumped into
 routine logs.
 
-Raw parameter contents are never copied into daemon metadata or logs. Existing
-`dscResult` and `stderr` preservation remains unchanged: DSC or a resource may
-echo parameter values in its own output. Protected result files can therefore
-contain those values; this feature does not introduce output redaction or secret
-handling. Resource authors and DSC own secure-value behavior.
+Raw input contents are never copied into daemon metadata or logs. DSC or a
+resource may echo values in `dscResult` or JSON-RPC error text. Protected result
+files can therefore contain those values; this feature does not introduce output
+redaction or secret handling. Shared stderr cannot be reliably partitioned into
+attempts, so it is continuously drained to a discard sink with fixed buffering,
+never retained, published or logged. The result's `stderr` field remains present
+but empty.
+
+Schema version 1 is retained: names, outcome classifications, nullable exit codes
+and the nested DSC payload keep their roles. With server transport, consumers
+must use `outcome`/`hadErrors`, not require `exitCode == 0` on success or expect
+per-attempt stderr. The hash framing is unchanged while its capture-to-submission
+guarantee is stronger.
 
 Readers must tolerate unknown fields and reject unsupported major envelope
 versions. Additive optional fields may retain version 1; changes to field meaning,
@@ -375,13 +409,14 @@ The next scheduled attempt is the normal retry opportunity.
 | Invalid options, unreadable input directory, unusable results directory, or missing executable at startup | Log clearly and exit nonzero. |
 | Input-directory scan fails after startup | Log the failed pass and retry on the next interval. |
 | A document cannot be read or DSC fails | Publish a failed attempt and continue to later documents. |
-| DSC exits zero but output is unusable or reports errors | Publish a failed attempt; do not claim success. |
+| DSC returns unusable RPC output or reports errors | Publish a failed attempt; restart only an unusable session. |
+| Server startup/initialization fails | Publish remaining input failures as described above, log a pass-level error, retry next pass. |
 | Result publication fails | Log source, destination, and error; continue; retry through later reconciliation. |
 | Shutdown is requested | Stop scheduling, cancel active execution, clean up, and exit normally. |
 
 Use `log/slog`, initially with a JSON handler at info level on stderr. Include
 stable context such as `config_path`, `result_path`, `duration`, `exit_code`, and
-`error`. Log lifecycle events and attempt summaries. Keep per-entry discovery
+`error_kind`. Log lifecycle events and attempt summaries. Keep per-entry discovery
 noise at debug level and log errors where handled rather than at every layer.
 DSC output and resource properties may contain secrets: store only in protected
 result files and do not mirror them into routine logs.
@@ -408,7 +443,7 @@ after the parent exits. Systemd additionally cleans up the whole service cgroup,
 including ordinary processes that created a new session. In foreground Linux,
 resources deliberately leaving the process group are not contained.
 
-Windows starts DSC suspended, assigns it to a per-attempt Job Object with
+Windows starts DSC suspended, assigns it to a per-session Job Object with
 `KILL_ON_JOB_CLOSE` and no breakaway permission, then resumes the primary thread.
 Cancellation terminates the job and the direct process; closing the job after
 completion also removes lingering descendants. If assignment fails, the
@@ -417,12 +452,14 @@ Job termination does not reach work delegated to an existing service, WMI or
 other broker. Neither platform can undo applied changes, kill kernel-stuck
 processes promptly, or provide a security sandbox for privileged resources.
 
-Cancellation is immediate termination, not a graceful resource shutdown.
-`exec.Cmd.WaitDelay` is two seconds, bounding waits for inherited output handles
-after exit/cancellation. A parent that exits while descendants hold its pipes
-can produce an `output` failure; its remaining descendants are then terminated.
-Resources are not allowed to leave persistent background children in their DSC
-process tree; use an actual service manager for persistent services.
+At normal pass completion, close server stdin, allow two seconds for EOF-driven
+exit, and wait/reap it. If it does not exit, terminate the contained process tree
+and report the forced shutdown as a pass-level error. Cancellation and fatal
+request failures terminate immediately. Owned pipe readers/writers are closed
+and joined during cleanup, so inherited resource handles cannot retain the
+session between passes. Remaining resource descendants are terminated when
+the session closes. Resources needing persistent services must use a service
+manager rather than leaving background children in the DSC process tree.
 
 ## Packaging and operational limits
 
@@ -450,14 +487,15 @@ draft pre-release with both archives and SHA-256 checksums. Publishing remains
 an explicit review step; release tags are not reused. DSC and its resources are
 separate prerequisites, not bundled release dependencies.
 
-The execution timeout defaults to 15 minutes and is configurable, without adding
-parallel execution. Capture at most 16 MiB of stdout and 1 MiB of stderr per
-attempt. Crossing either limit cancels the process tree and yields an `output`
-failure; excess bytes are discarded without unbounded buffering. Truncated
-stdout is not parsed or preserved. Stderr retains its prefix plus a truncation
-marker. Limits are fixed in v1 rather than adding more operator options. JSON
-decoding/serialization adds bounded allocations beyond the captured byte counts;
-these limits are not a whole-process memory quota.
+The execution timeout defaults to 15 minutes and covers one configuration request,
+including a blocked stdin write or waiting for its response. A timed-out request
+is `canceled` and its session is destroyed before later documents continue.
+Capture at most 16 MiB of combined configuration/parameter UTF-8 input per attempt.
+Each newline-delimited stdout frame is limited to 16 MiB; exceeding that limit is
+an `output` failure and destroys the session. Notifications do not accumulate.
+Shared stderr is continuously discarded using fixed buffering. JSON framing and
+decoding add bounded allocations beyond these byte limits; they are not a
+whole-process memory quota. These fixed limits avoid extra operator flags.
 
 ## Validation and implementation order
 
@@ -489,8 +527,9 @@ startup failure and shutdown bounds are tested.
 Initial local verification exercised Windows amd64 and Linux amd64 under WSL,
 including build/test/vet, race checks, helper-process descendant cleanup,
 bounded output, spaces in paths, and concurrent complete-result visibility.
-An opt-in Windows test against DSC `3.2.0-preview.14` verified Echo defaults and
-parameter overrides for all six configuration/parameter-format combinations.
+An opt-in Windows test against DSC `3.3.0` verified MCP initialization,
+EOF shutdown, Echo defaults and inline parameter overrides for all six
+configuration/parameter-format combinations in one shared server session.
 This is not native Linux hardware, general DSC resource or power-loss validation.
 Actual service installation, host-shutdown delivery and other DSC/resource compatibility must
 still be verified in a disposable deployment environment; CI definitions are

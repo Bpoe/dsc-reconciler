@@ -20,7 +20,11 @@ type fakeDSC struct {
 	run func(context.Context, dsc.Input) dsc.Result
 }
 
-func (f fakeDSC) Execute(ctx context.Context, input dsc.Input) dsc.Result { return f.run(ctx, input) }
+func (f fakeDSC) Execute(ctx context.Context, input dsc.Input) (dsc.Result, error) {
+	return f.run(ctx, input), nil
+}
+func (f fakeDSC) Close() error                       { return nil }
+func (f fakeDSC) start(context.Context) (DSC, error) { return f, nil }
 
 type fakeWriter struct {
 	results []dsc.Result
@@ -89,7 +93,7 @@ func TestFailureContinuationAndRediscovery(t *testing.T) {
 		calls = append(calls, name)
 		return dsc.Result{Configuration: name, Outcome: "failed", Error: &dsc.Failure{Kind: "exit"}}
 	}}
-	r := New(dir, time.Second, client, writer, logger())
+	r := New(dir, time.Second, client.start, writer, logger())
 	if err := r.Pass(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +124,7 @@ func TestInputChangedBeforeExecution(t *testing.T) {
 		}
 		return dsc.Result{Configuration: filepath.Base(input.Configuration), Outcome: "succeeded"}
 	}}
-	if err := New(dir, time.Second, client, writer, logger()).Pass(context.Background()); err != nil {
+	if err := New(dir, time.Second, client.start, writer, logger()).Pass(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(writer.results) != 2 || writer.results[1].Error.Kind != "input" {
@@ -147,7 +151,7 @@ func TestCancellationPublishesAndStops(t *testing.T) {
 		cancel()
 		return dsc.Result{Configuration: filepath.Base(input.Configuration), Outcome: "canceled", Error: &dsc.Failure{Kind: "canceled"}}
 	}}
-	err := New(dir, time.Second, client, writer, logger()).Pass(ctx)
+	err := New(dir, time.Second, client.start, writer, logger()).Pass(ctx)
 	if !errors.Is(err, context.Canceled) || len(writer.results) != 1 {
 		t.Fatalf("cancellation: results=%v err=%v", writer.results, err)
 	}
@@ -185,7 +189,7 @@ func TestRunDelayAfterPass(t *testing.T) {
 				done := make(chan struct{})
 				start := time.Now()
 				go func() {
-					New(dir, interval, client, writer, logger()).Run(ctx)
+					New(dir, interval, client.start, writer, logger()).Run(ctx)
 					close(done)
 				}()
 				synctest.Wait()
@@ -259,7 +263,7 @@ func TestRunCancellationAfterPass(t *testing.T) {
 				}}
 				done := make(chan struct{})
 				go func() {
-					New(dir, interval, client, writer, logger()).Run(ctx)
+					New(dir, interval, client.start, writer, logger()).Run(ctx)
 					close(done)
 				}()
 				synctest.Wait()
@@ -306,7 +310,7 @@ func TestRunRetriesPassFailureAfterInterval(t *testing.T) {
 			calls <- struct{}{}
 			return dsc.Result{Configuration: filepath.Base(input.Configuration), Outcome: "succeeded"}
 		}}
-		go New(dir, interval, client, &fakeWriter{}, logger()).Run(ctx)
+		go New(dir, interval, client.start, &fakeWriter{}, logger()).Run(ctx)
 		synctest.Wait()
 		if len(calls) != 0 {
 			t.Fatal("executed a document in an unreadable directory")
@@ -334,7 +338,7 @@ func TestScanFailureAndCanceledStartup(t *testing.T) {
 		t.Fatal("unexpected execution")
 		return dsc.Result{}
 	}}
-	r := New(filepath.Join(t.TempDir(), "missing"), time.Second, client, writer, logger())
+	r := New(filepath.Join(t.TempDir(), "missing"), time.Second, client.start, writer, logger())
 	if r.Pass(context.Background()) == nil {
 		t.Fatal("scan failure was ignored")
 	}

@@ -1,27 +1,27 @@
 package dsc
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
-// Synthetic fixture following the official v3.1.0 config/set result reference.
-const validOutput = `{"metadata":{"Microsoft.DSC":{"version":"3.1.0","operation":"Set","executionType":"Actual"}},"results":[],"messages":[],"hadErrors":false,"future":{"integer":9007199254740993}}`
+const validOutput = `{"metadata":{},"results":[],"messages":[],"hadErrors":false,"future":{"integer":9007199254740993}}`
+const initializedResult = `{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"1"}}`
 
 func TestMain(m *testing.M) {
 	switch os.Getenv("DSCD_TEST_HELPER") {
-	case "dsc":
-		os.Exit(helperDSC())
+	case "server":
+		os.Exit(helperServer())
 	case "child":
 		if err := os.WriteFile(os.Getenv("DSCD_CHILD_READY"), []byte("ready"), 0600); err != nil {
 			os.Exit(90)
@@ -33,90 +33,161 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func helperDSC() int {
-	args := os.Args[1:]
-	if len(args) == 0 || args[0] != "config" {
+func helperServer() int {
+	if len(os.Args) != 2 || os.Args[1] != "server" {
 		return 91
 	}
-	args = args[1:]
-	parameters := ""
-	if len(args) >= 2 && args[0] == "--parameters-file" {
-		parameters = args[1]
-		args = args[2:]
-	}
-	if parameters != os.Getenv("DSCD_TEST_PARAMETERS") {
-		return 96
-	}
-	if parameters != "" {
-		if !filepath.IsAbs(parameters) {
-			return 97
-		}
-		if _, err := os.ReadFile(parameters); err != nil {
-			return 98
-		}
-	}
-	if len(args) != 5 || !slices.Equal(args[:2], []string{"set", "--file"}) ||
-		!slices.Equal(args[3:], []string{"--output-format", "json"}) || !filepath.IsAbs(args[2]) {
-		return 91
-	}
-	path := args[2]
-	data, err := os.ReadFile(path)
-	if err != nil {
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Buffer(make([]byte, 4096), 100<<20)
+	encode := json.NewEncoder(os.Stdout)
+	if !scanner.Scan() {
 		return 92
 	}
-	mode := string(data)
-	switch mode {
-	case "invalid":
-		fmt.Print("not JSON")
-	case "dsc-error":
-		fmt.Print(strings.Replace(validOutput, `"hadErrors":false`, `"hadErrors":true`, 1))
-	case "exit":
-		fmt.Print(validOutput)
-		fmt.Fprint(os.Stderr, "private diagnostic")
-		return 7
-	case "invalid-exit":
-		fmt.Print("bad JSON")
-		return 8
-	case "stdout-limit":
-		fmt.Print(strings.Repeat("x", stdoutLimit+1))
-	case "stderr-limit":
-		fmt.Print(validOutput)
-		fmt.Fprint(os.Stderr, strings.Repeat("x", stderrLimit+1))
+	var init struct {
+		JSONRPC string `json:"jsonrpc"`
+		ID      uint64 `json:"id"`
+		Method  string `json:"method"`
+		Params  struct {
+			ProtocolVersion string                         `json:"protocolVersion"`
+			Capabilities    map[string]json.RawMessage     `json:"capabilities"`
+			ClientInfo      struct{ Name, Version string } `json:"clientInfo"`
+		} `json:"params"`
+	}
+	if json.Unmarshal(scanner.Bytes(), &init) != nil || init.JSONRPC != "2.0" || init.ID != 1 ||
+		init.Method != "initialize" || init.Params.ProtocolVersion != protocolVersion ||
+		string(init.Params.Capabilities["tools"]) != "{}" || init.Params.ClientInfo.Name != "dscd" || init.Params.ClientInfo.Version == "" {
+		return 93
+	}
+	switch os.Getenv("DSCD_TEST_INIT") {
 	case "hang":
 		for {
 			time.Sleep(time.Hour)
 		}
-	case "descendant", "descendant-exit":
-		executable, err := os.Executable()
-		if err != nil {
-			return 93
+	case "malformed":
+		fmt.Println("bad JSON")
+		return 0
+	case "error":
+		_ = encode.Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "error": map[string]any{"code": -32602, "message": "private init diagnostic"}})
+		for scanner.Scan() {
 		}
-		child := exec.Command(executable)
-		child.Env = append(os.Environ(), "DSCD_TEST_HELPER=child", "DSCD_CHILD_READY="+path+".ready")
-		child.Stdout, child.Stderr = os.Stdout, os.Stderr
-		if err := child.Start(); err != nil {
-			return 94
+		return 0
+	case "shape":
+		_ = encode.Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{}})
+	default:
+		_ = encode.Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": json.RawMessage(initializedResult)})
+	}
+	if !scanner.Scan() {
+		return 94
+	}
+	var notification map[string]json.RawMessage
+	if json.Unmarshal(scanner.Bytes(), &notification) != nil || string(notification["method"]) != `"notifications/initialized"` || notification["id"] != nil {
+		return 95
+	}
+	if os.Getenv("DSCD_TEST_NO_READ") == "1" {
+		for {
+			time.Sleep(time.Hour)
 		}
-		if err := os.WriteFile(path+".pid", []byte(strconv.Itoa(child.Process.Pid)), 0600); err != nil {
-			_ = child.Process.Kill()
-			return 95
+	}
+	lastID := uint64(1)
+	for scanner.Scan() {
+		var req struct {
+			JSONRPC string `json:"jsonrpc"`
+			ID      uint64 `json:"id"`
+			Method  string `json:"method"`
+			Params  struct {
+				Name      string `json:"name"`
+				Arguments struct {
+					Operation     string  `json:"operation"`
+					Configuration string  `json:"configuration"`
+					Parameters    *string `json:"parameters"`
+				} `json:"arguments"`
+			} `json:"params"`
 		}
-		if mode == "descendant" {
+		if json.Unmarshal(scanner.Bytes(), &req) != nil || req.JSONRPC != "2.0" || req.ID != lastID+1 ||
+			req.Method != "tools/call" || req.Params.Name != "invoke_dsc_config" || req.Params.Arguments.Operation != "set" {
+			return 96
+		}
+		lastID = req.ID
+		mode := req.Params.Arguments.Configuration
+		payload := json.RawMessage(validOutput)
+		switch mode {
+		case "rpc-error":
+			_ = encode.Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": -32602, "message": "private operation diagnostic"}})
+			continue
+		case "dsc-error":
+			payload = json.RawMessage(strings.Replace(validOutput, `"hadErrors":false`, `"hadErrors":true`, 1))
+		case "tool-error":
+			_ = encode.Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"isError": true, "content": []any{map[string]string{"type": "text", "text": "private tool diagnostic"}}}})
+			continue
+		case "mismatch":
+			req.ID++
+		case "malformed":
+			fmt.Println("bad JSON")
+			continue
+		case "structured":
+			_ = encode.Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"structuredContent": map[string]any{"result": 42}}})
+			continue
+		case "exit":
+			return 7
+		case "partial":
+			fmt.Print(`{"jsonrpc":`)
+			return 7
+		case "hang":
 			for {
 				time.Sleep(time.Hour)
 			}
+		case "notifications":
+			_ = encode.Encode(map[string]any{"jsonrpc": "2.0", "method": "notifications/progress", "params": map[string]any{"unknown": true}})
+		case "stdout-limit":
+			fmt.Println(strings.Repeat("x", stdoutLimit+1))
+			continue
+		case "stderr-flood":
+			fmt.Fprint(os.Stderr, strings.Repeat("private stderr", 200000))
+		case "descendant", "descendant-hang", "descendant-exit":
+			path := os.Getenv("DSCD_CHILD_READY")
+			executable, _ := os.Executable()
+			child := exec.Command(executable)
+			child.Env = append(os.Environ(), "DSCD_TEST_HELPER=child")
+			child.Stdout, child.Stderr = os.Stdout, os.Stderr
+			if child.Start() != nil {
+				return 97
+			}
+			if os.WriteFile(path+".pid", []byte(strconv.Itoa(child.Process.Pid)), 0600) != nil {
+				return 98
+			}
+			if mode == "descendant-exit" {
+				return 7
+			}
+			if mode == "descendant-hang" {
+				for {
+					time.Sleep(time.Hour)
+				}
+			}
+		case "inline":
+			if req.Params.Arguments.Parameters == nil || *req.Params.Arguments.Parameters != "message: exact text\n" {
+				return 99
+			}
+		default:
+			if mode != "empty-sidecar" && req.Params.Arguments.Parameters != nil {
+				return 100
+			}
+			if mode == "empty-sidecar" && (req.Params.Arguments.Parameters == nil || *req.Params.Arguments.Parameters != "") {
+				return 101
+			}
 		}
-		fmt.Print(validOutput)
-	default:
-		fmt.Print(validOutput)
-		fmt.Fprint(os.Stderr, "private diagnostic")
+		_ = encode.Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"structuredContent": map[string]any{"result": payload}, "future": true}})
+	}
+	if os.Getenv("DSCD_TEST_EOF_HANG") == "1" {
+		for {
+			time.Sleep(time.Hour)
+		}
 	}
 	return 0
 }
 
 func helperClient(t *testing.T) (*Client, string) {
 	t.Helper()
-	t.Setenv("DSCD_TEST_HELPER", "dsc")
+	t.Setenv("DSCD_TEST_HELPER", "server")
 	dir := filepath.Join(t.TempDir(), "directory with spaces")
 	if err := os.Mkdir(dir, 0700); err != nil {
 		t.Fatal(err)
@@ -129,113 +200,183 @@ func helperClient(t *testing.T) (*Client, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	copyPath := filepath.Join(dir, "fake dsc"+filepath.Ext(executable))
-	if err := os.WriteFile(copyPath, data, 0700); err != nil {
+	path := filepath.Join(dir, "fake dsc"+filepath.Ext(executable))
+	if err := os.WriteFile(path, data, 0700); err != nil {
 		t.Fatal(err)
 	}
-	return NewClient(copyPath, 10*time.Second), dir
+	return NewClient(path, 10*time.Second), dir
 }
 
-func writeMode(t *testing.T, dir, mode string) string {
+func startSession(t *testing.T, client *Client, ctx context.Context) *Session {
 	t.Helper()
-	path := filepath.Join(dir, mode+" config.yaml")
-	if err := os.WriteFile(path, []byte(mode), 0600); err != nil {
+	session, err := client.Start(ctx)
+	if err != nil {
 		t.Fatal(err)
 	}
-	return path
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return session
 }
 
-func TestExecuteClassification(t *testing.T) {
-	client, dir := helperClient(t)
+func TestSessionNormalFailuresAndInlineInputs(t *testing.T) {
+	client, _ := helperClient(t)
+	session := startSession(t, client, context.Background())
+	pid := session.cmd.Process.Pid
 	for _, test := range []struct {
 		mode, kind string
-		payload    bool
-		code       int
+		parameters bool
 	}{
-		{"success", "", true, 0},
-		{"invalid", "output", false, 0},
-		{"dsc-error", "dsc", true, 0},
-		{"exit", "exit", true, 7},
-		{"invalid-exit", "exit", false, 8},
-		{"stdout-limit", "output", false, -1},
-		{"stderr-limit", "output", true, -1},
+		{"success", "", false}, {"inline", "", true}, {"empty-sidecar", "", true},
+		{"notifications", "", false}, {"rpc-error", "dsc", false}, {"dsc-error", "dsc", false},
+		{"tool-error", "dsc", false}, {"stderr-flood", "", false}, {"success", "", false},
 	} {
-		t.Run(test.mode, func(t *testing.T) {
-			path := writeMode(t, dir, test.mode)
-			result := client.Execute(context.Background(), Input{Configuration: path})
-			kind := ""
-			if result.Error != nil {
-				kind = result.Error.Kind
+		in := Input{Configuration: "a.yaml", ConfigurationText: test.mode}
+		if test.parameters {
+			in.Parameters = "a.parameters.json"
+			if test.mode == "inline" {
+				in.ParametersText = "message: exact text\n"
 			}
-			if kind != test.kind || (result.DSCResult != nil) != test.payload {
-				t.Fatalf("kind=%q payload=%t outcome=%s error=%+v", kind, result.DSCResult != nil, result.Outcome, result.Error)
+		}
+		r, err := session.Execute(context.Background(), in)
+		if err != nil {
+			t.Fatalf("%s: %v", test.mode, err)
+		}
+		if (r.Error == nil) != (test.kind == "") || r.Error != nil && r.Error.Kind != test.kind {
+			t.Fatalf("%s: %+v", test.mode, r)
+		}
+		if r.ExitCode != nil || r.Stderr != "" || session.cmd.Process.Pid != pid {
+			t.Fatalf("invented per-attempt process diagnostics or replaced session: %+v", r)
+		}
+		if r.StartedAt.IsZero() || r.FinishedAt.IsZero() || r.DurationMS < 0 {
+			t.Fatal("missing timing")
+		}
+		if test.kind == "" && string(r.DSCResult) != validOutput {
+			t.Fatal("lost exact nested DSC result")
+		}
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if session.cmd.ProcessState.ExitCode() != 0 {
+		t.Fatal("server did not exit normally on EOF")
+	}
+	if !processStopped(pid) {
+		t.Fatal("server remained alive after Close")
+	}
+}
+
+func TestProtocolFailuresTerminateSession(t *testing.T) {
+	client, _ := helperClient(t)
+	for _, mode := range []string{"mismatch", "malformed", "structured", "exit", "partial", "stdout-limit"} {
+		t.Run(mode, func(t *testing.T) {
+			s := startSession(t, client, context.Background())
+			r, err := s.Execute(context.Background(), Input{Configuration: "a.yaml", ConfigurationText: mode})
+			if err == nil || r.Error == nil || r.Outcome != "failed" || !s.closed {
+				t.Fatalf("protocol failure was not fatal to session: %+v %v", r, err)
 			}
-			if test.code >= 0 && (result.ExitCode == nil || *result.ExitCode != test.code) {
-				t.Errorf("exit code = %v, want %d", result.ExitCode, test.code)
-			}
-			if result.Configuration != filepath.Base(path) || result.SchemaVersion != 1 ||
-				result.StartedAt.IsZero() || result.FinishedAt.IsZero() || result.DurationMS < 0 {
-				t.Fatal("invalid result identity/times")
-			}
-			if test.mode == "success" && (result.Outcome != "succeeded" || result.Stderr != "private diagnostic") {
-				t.Fatalf("success = %+v", result)
-			}
-			if len(result.Stderr) > stderrLimit+100 {
-				t.Fatal("unbounded stderr")
+			if !processStopped(s.cmd.Process.Pid) {
+				t.Fatal("server still running")
 			}
 		})
 	}
 }
 
-func TestStartAndCancellation(t *testing.T) {
-	client, dir := helperClient(t)
-	path := writeMode(t, dir, "hang")
-	missing := NewClient(filepath.Join(dir, "missing"), time.Second)
-	if r := missing.Execute(context.Background(), Input{Configuration: path}); r.Error.Kind != "start" || r.ExitCode != nil {
-		t.Fatalf("start failure = %+v", r)
+func TestRequestTimeoutAndCancellation(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		client, _ := helperClient(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		s := startSession(t, client, ctx)
+		s.timeout = 100 * time.Millisecond
+		if canceled {
+			cancel()
+		}
+		r, err := s.Execute(ctx, Input{Configuration: "a.yaml", ConfigurationText: "hang"})
+		cancel()
+		if err == nil || r.Outcome != "canceled" || r.Error.Kind != "canceled" || !s.closed {
+			t.Fatalf("timeout/cancellation: %+v %v", r, err)
+		}
+		if !processStopped(s.cmd.Process.Pid) {
+			t.Fatal("canceled server survived")
+		}
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if r := client.Execute(ctx, Input{Configuration: path}); r.Outcome != "canceled" || r.Error.Kind != "canceled" || r.ExitCode != nil {
-		t.Fatalf("pre-canceled = %+v", r)
+}
+
+func TestInitializationFailures(t *testing.T) {
+	client, _ := helperClient(t)
+	for _, mode := range []string{"error", "shape", "malformed", "hang"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("DSCD_TEST_INIT", mode)
+			client.timeout = 500 * time.Millisecond
+			s, err := client.Start(context.Background())
+			if err == nil || s != nil {
+				t.Fatal("accepted initialization failure")
+			}
+			if strings.Contains(err.Error(), "private init") {
+				t.Fatal("unsafe startup diagnostics")
+			}
+		})
 	}
-	client.timeout = 100 * time.Millisecond
-	if r := client.Execute(context.Background(), Input{Configuration: path}); r.Outcome != "canceled" || r.DurationMS > 5000 {
-		t.Fatalf("timeout = %+v", r)
+	missing := NewClient(filepath.Join(t.TempDir(), "missing"), time.Second)
+	if _, err := missing.Start(context.Background()); err == nil {
+		t.Fatal("started missing executable")
+	}
+}
+
+func TestCloseForcesUnresponsiveServer(t *testing.T) {
+	client, _ := helperClient(t)
+	t.Setenv("DSCD_TEST_EOF_HANG", "1")
+	s, err := client.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if err := s.Close(); err == nil {
+		t.Fatal("forced close not reported")
+	}
+	if time.Since(start) > 8*time.Second || !processStopped(s.cmd.Process.Pid) {
+		t.Fatal("close was not bounded")
 	}
 }
 
 func TestDescendantCleanup(t *testing.T) {
-	for _, mode := range []string{"descendant", "descendant-exit"} {
+	for _, mode := range []string{"descendant", "descendant-hang", "descendant-exit"} {
 		t.Run(mode, func(t *testing.T) {
 			client, dir := helperClient(t)
-			path := writeMode(t, dir, mode)
+			ready := filepath.Join(dir, "ready")
+			t.Setenv("DSCD_CHILD_READY", ready)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			done := make(chan Result, 1)
-			go func() { done <- client.Execute(ctx, Input{Configuration: path}) }()
-			waitFor(t, func() bool { _, err := os.Stat(path + ".ready"); return err == nil })
-			pidBytes, err := os.ReadFile(path + ".pid")
-			if err != nil {
-				t.Fatal(err)
+			s := startSession(t, client, ctx)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_, _ = s.Execute(ctx, Input{Configuration: "a.yaml", ConfigurationText: mode})
+			}()
+			if mode != "descendant-exit" {
+				waitFor(t, func() bool { _, err := os.Stat(ready); return err == nil })
 			}
-			pid, err := strconv.Atoi(string(pidBytes))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if mode == "descendant" {
+			var pid int
+			waitFor(t, func() bool {
+				raw, err := os.ReadFile(ready + ".pid")
+				if err != nil {
+					return false
+				}
+				pid, err = strconv.Atoi(string(raw))
+				return err == nil && pid > 0
+			})
+			if mode == "descendant-hang" {
 				cancel()
 			}
 			select {
-			case result := <-done:
-				if mode == "descendant" && result.Outcome != "canceled" {
-					t.Fatalf("cancel = %+v", result)
-				}
-				if mode == "descendant-exit" && (result.Error == nil || result.Error.Kind != "output") {
-					t.Fatalf("inherited pipe = %+v", result)
-				}
+			case <-done:
 			case <-time.After(8 * time.Second):
-				t.Fatal("execution did not finish within cleanup bound")
+				t.Fatal("execution stuck")
+			}
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
 			}
 			waitFor(t, func() bool { return processStopped(pid) })
 		})
@@ -254,80 +395,76 @@ func waitFor(t *testing.T, condition func() bool) {
 	t.Fatal("condition did not become true")
 }
 
-func TestParseOutput(t *testing.T) {
-	for _, data := range []string{
-		"", "null", "[]", "{}", validOutput + "{}",
-		strings.Replace(validOutput, "Actual", string([]byte{0xff}), 1),
-		strings.Replace(validOutput, `"metadata":{`, `"metadata":null,"unused":{`, 1),
-		strings.Replace(validOutput, `"results":[]`, `"results":null`, 1),
-		strings.Replace(validOutput, `"messages":[]`, `"messages":{}`, 1),
-		strings.Replace(validOutput, `"hadErrors":false`, `"hadErrors":null`, 1),
-		strings.Replace(validOutput, `"hadErrors":false`, `"hadErrors":"false"`, 1),
+func TestProtocolValidation(t *testing.T) {
+	for _, line := range []string{
+		`null`, `[]`, `garbage`, `{"jsonrpc":"1.0","id":2,"result":{}}`,
+		`{"jsonrpc":"2.0","id":null,"result":{}}`, `{"jsonrpc":"2.0","id":"2","result":{}}`,
+		`{"jsonrpc":"2.0","id":2,"result":{},"error":{}}`, `{"jsonrpc":"2.0","id":2}`,
+		`{"jsonrpc":"2.0","id":2,"result":[]}`, `{"jsonrpc":"2.0","id":2,"method":"request"}`,
+		`{"jsonrpc":"2.0","method":"notification","params":false}`,
+		`{"jsonrpc":"2.0","id":2,"method":null,"result":{}}`,
+		`{"jsonrpc":"2.0","id":2,"error":{"code":"bad","message":"bad"}}`,
 	} {
-		if _, _, err := parseOutput([]byte(data)); err == nil {
-			t.Errorf("accepted invalid output %q", data)
+		if _, err := decodeResponse([]byte(line)); err == nil {
+			t.Errorf("accepted %s", line)
 		}
 	}
-	payload, hadErrors, err := parseOutput([]byte(validOutput))
-	if err != nil || hadErrors || string(payload) != validOutput {
-		t.Fatalf("lost payload: %s, %t, %v", payload, hadErrors, err)
+	for _, data := range []string{"", "null", "[]", "{}", validOutput + "{}", strings.Replace(validOutput, `"hadErrors":false`, `"hadErrors":null`, 1)} {
+		if _, _, err := parseOutput([]byte(data)); err == nil {
+			t.Errorf("accepted DSC result %q", data)
+		}
 	}
-	result := InputFailure(Input{Configuration: "a.yaml"}, fmt.Errorf("unreadable"))
-	data, err := json.Marshal(result)
-	if err != nil {
+	r := InputFailure(Input{Configuration: "a.yaml"}, errors.New("unreadable"))
+	data, _ := json.Marshal(r)
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil || len(fields) != 10 || string(fields["exitCode"]) != "null" {
+		t.Fatal("changed envelope")
+	}
+}
+
+func TestBlockedRequestWriteIsCanceled(t *testing.T) {
+	client, _ := helperClient(t)
+	t.Setenv("DSCD_TEST_NO_READ", "1")
+	s := startSession(t, client, context.Background())
+	s.timeout = 100 * time.Millisecond
+	r, err := s.Execute(context.Background(), Input{Configuration: "a.yaml", ConfigurationText: strings.Repeat("x", 2<<20)})
+	if err == nil || r.Outcome != "canceled" || !s.closed || !processStopped(s.cmd.Process.Pid) {
+		t.Fatalf("blocked write wasn't canceled: %+v %v", r, err)
+	}
+}
+
+func TestCancelIdleSession(t *testing.T) {
+	client, _ := helperClient(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	s := startSession(t, client, ctx)
+	cancel()
+	select {
+	case <-s.done:
+	case <-time.After(8 * time.Second):
+		t.Fatal("idle server survived cancellation")
+	}
+	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil || len(fields) != 10 || string(fields["exitCode"]) != "null" || string(fields["dscResult"]) != "null" {
-		t.Fatalf("envelope fields = %s (%v)", data, err)
+	if !processStopped(s.cmd.Process.Pid) {
+		t.Fatal("idle server remained alive")
 	}
 }
 
-func TestExecuteWithParameters(t *testing.T) {
-	client, dir := helperClient(t)
-	for _, configExt := range []string{".yaml", ".json"} {
-		for _, paramExt := range []string{"", ".yaml", ".json"} {
-			t.Run(configExt+"/parameters"+paramExt, func(t *testing.T) {
-				path := filepath.Join(dir, "config with spaces"+configExt)
-				if err := os.WriteFile(path, []byte("success"), 0600); err != nil {
-					t.Fatal(err)
-				}
-				parameters := ""
-				if paramExt != "" {
-					parameters = filepath.Join(dir, "config with spaces.parameters"+paramExt)
-					if err := os.WriteFile(parameters, []byte("opaque-secret-value"), 0600); err != nil {
-						t.Fatal(err)
-					}
-				}
-				t.Setenv("DSCD_TEST_PARAMETERS", parameters)
-				result := client.Execute(context.Background(), Input{Configuration: path, Parameters: parameters})
-				if result.Outcome != "succeeded" || result.ExitCode == nil || *result.ExitCode != 0 {
-					t.Fatalf("parameter invocation failed: %+v", result)
-				}
-				expected := ""
-				if parameters != "" {
-					expected = filepath.Base(parameters)
-				}
-				if result.Parameters != expected {
-					t.Fatalf("parameters = %q, want %q", result.Parameters, expected)
-				}
-				data, err := json.Marshal(result)
-				if err != nil || strings.Contains(string(data), "opaque-secret-value") || strings.Contains(string(data), dir) {
-					t.Fatalf("parameter content or absolute path leaked in result: %s (%v)", data, err)
-				}
-			})
+func TestFrameLimitsAndToolShapes(t *testing.T) {
+	for _, size := range []int{stdoutLimit, stdoutLimit + 1} {
+		frame := strings.Repeat("x", size-1) + "\n"
+		got, err := readFrame(bufio.NewReader(strings.NewReader(frame)))
+		if size == stdoutLimit && (err != nil || len(got) != size) {
+			t.Fatalf("boundary frame rejected: %v", err)
+		}
+		if size > stdoutLimit && err == nil {
+			t.Fatal("oversized frame accepted")
 		}
 	}
-}
-
-func TestCaptureLimitThroughCopy(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	b := &limitedBuffer{limit: 10, cancel: cancel}
-	// Hiding WriterTo exercises io.Copy's ReaderFrom optimization if one is exposed.
-	source := struct{ io.Reader }{strings.NewReader(strings.Repeat("x", 100))}
-	n, err := io.Copy(b, source)
-	if err != nil || n != 100 || b.buffer.Len() != 10 || !b.exceeded || ctx.Err() == nil {
-		t.Fatalf("capture: n=%d len=%d exceeded=%t canceled=%v err=%v", n, b.buffer.Len(), b.exceeded, ctx.Err(), err)
+	for _, raw := range []string{`{}`, `{"structuredContent":null}`, `{"structuredContent":[]}`, `{"isError":null}`, `{"isError":"false"}`} {
+		if _, _, _, err := parseToolResult(json.RawMessage(raw)); err == nil {
+			t.Errorf("accepted malformed tool result %s", raw)
+		}
 	}
 }

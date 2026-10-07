@@ -4,6 +4,7 @@ package reconcile
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"time"
@@ -11,9 +12,11 @@ import (
 	"github.com/Bpoe/dsc-reconciler/internal/dsc"
 )
 
-// DSC applies an opaque configuration document and optional parameter file.
+// DSC is a pass-scoped server session. Execute returns an error only when the
+// session is no longer usable; every attempted input still receives a Result.
 type DSC interface {
-	Execute(context.Context, dsc.Input) dsc.Result
+	Execute(context.Context, dsc.Input) (dsc.Result, error)
+	Close() error
 }
 
 // ResultWriter validates destination names and publishes complete attempt results.
@@ -26,14 +29,14 @@ type ResultWriter interface {
 type Reconciler struct {
 	dir      string
 	interval time.Duration
-	dsc      DSC
+	start    func(context.Context) (DSC, error)
 	writer   ResultWriter
 	log      *slog.Logger
 }
 
 // New wires one instance; interval must be positive.
-func New(dir string, interval time.Duration, client DSC, writer ResultWriter, logger *slog.Logger) *Reconciler {
-	return &Reconciler{dir: dir, interval: interval, dsc: client, writer: writer, log: logger}
+func New(dir string, interval time.Duration, start func(context.Context) (DSC, error), writer ResultWriter, logger *slog.Logger) *Reconciler {
+	return &Reconciler{dir: dir, interval: interval, start: start, writer: writer, log: logger}
 }
 
 // Run reconciles immediately, then waits the interval after each pass, including failures.
@@ -56,7 +59,7 @@ func (r *Reconciler) Run(ctx context.Context) {
 }
 
 // Pass discovers and attempts each eligible document once. Per-document failures are handled locally.
-func (r *Reconciler) Pass(ctx context.Context) error {
+func (r *Reconciler) Pass(ctx context.Context) (passErr error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -64,6 +67,13 @@ func (r *Reconciler) Pass(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	var server DSC
+	var startErr error
+	defer func() {
+		if server != nil {
+			passErr = errors.Join(passErr, server.Close())
+		}
+	}()
 	for _, candidate := range candidates {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -78,16 +88,38 @@ func (r *Reconciler) Pass(ctx context.Context) error {
 		var result dsc.Result
 		hash := ""
 		err = candidate.err
+		input := candidate.input
 		if err == nil {
-			hash, err = inputHash(ctx, candidate.input)
+			input, err = readInput(ctx, input)
+			if err == nil {
+				hash = inputHash(input)
+			}
 		}
 		if err != nil {
-			result = dsc.InputFailure(candidate.input, err)
+			result = dsc.InputFailure(input, err)
 		} else {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			result = r.dsc.Execute(ctx, candidate.input)
+			if server == nil && startErr == nil {
+				server, startErr = r.start(ctx)
+				if startErr != nil {
+					// A factory may return a typed nil session along with its error.
+					server = nil
+				}
+			}
+			if startErr != nil {
+				result = dsc.StartFailure(input, startErr)
+			} else {
+				result, err = server.Execute(ctx, input)
+				if err != nil {
+					// The failed input is never retried; recovery is for the next document.
+					if closeErr := server.Close(); closeErr != nil {
+						passErr = errors.Join(passErr, fmt.Errorf("close unusable DSC session: %w", closeErr))
+					}
+					server = nil
+				}
+			}
 		}
 		result.InputHash = hash
 		level := slog.LevelInfo
@@ -96,14 +128,12 @@ func (r *Reconciler) Pass(ctx context.Context) error {
 		}
 		// Do not log diagnostics or the result payload: resources may expose secrets.
 		kind := ""
-		message := ""
 		if result.Error != nil {
 			kind = result.Error.Kind
-			message = result.Error.Message
 		}
 		r.log.Log(ctx, level, "DSC attempt completed", "config_path", path, "outcome", result.Outcome,
 			"duration", time.Duration(result.DurationMS)*time.Millisecond, "exit_code", result.ExitCode,
-			"parameters_path", candidate.input.Parameters, "error_kind", kind, "error", message)
+			"parameters_path", input.Parameters, "error_kind", kind)
 		publication, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		err = r.writer.Write(publication, result)
 		cancel()
@@ -111,5 +141,8 @@ func (r *Reconciler) Pass(ctx context.Context) error {
 			r.log.Error("result publication failed", "config_path", path, "result_path", target, "error", err)
 		}
 	}
-	return nil
+	if startErr != nil {
+		return errors.Join(passErr, fmt.Errorf("DSC server unavailable for remaining configurations in pass: %w", startErr))
+	}
+	return passErr
 }

@@ -25,6 +25,19 @@ func TestRealDSCParameterFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := NewClient(path, 30*time.Second)
+	session, err := client.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	failed, err := session.Execute(context.Background(), Input{Configuration: "invalid.yaml", ConfigurationText: "not a configuration"})
+	if err != nil || failed.Error == nil || failed.Error.Kind != "dsc" {
+		t.Fatalf("expected an ordinary DSC error on the reusable session: %+v (%v)", failed.Error, err)
+	}
 	documents := []struct {
 		ext, content string
 	}{
@@ -45,26 +58,24 @@ resources:
 		ext, content, output string
 	}{
 		{"", "", "Hello from dscd"},
-		{".yaml", "parameters:\n  message: Hello from parameters\n", "Hello from parameters"},
-		{".json", `{"parameters":{"message":"Hello from parameters"}}`, "Hello from parameters"},
+		{".yaml", "message: Hello from parameters\n", "Hello from parameters"},
+		{".json", `{"message":"Hello from parameters"}`, "Hello from parameters"},
 	}
 	for _, document := range documents {
 		for _, parameter := range parameters {
 			t.Run(document.ext+"/parameters"+parameter.ext, func(t *testing.T) {
 				dir := t.TempDir()
-				in := Input{Configuration: filepath.Join(dir, "echo with spaces"+document.ext)}
-				if err := os.WriteFile(in.Configuration, []byte(document.content), 0600); err != nil {
-					t.Fatal(err)
-				}
+				in := Input{Configuration: filepath.Join(dir, "echo with spaces"+document.ext), ConfigurationText: document.content}
 				if parameter.ext != "" {
 					in.Parameters = filepath.Join(dir, "echo with spaces.parameters"+parameter.ext)
-					if err := os.WriteFile(in.Parameters, []byte(parameter.content), 0600); err != nil {
-						t.Fatal(err)
-					}
+					in.ParametersText = parameter.content
 				}
-				result := client.Execute(context.Background(), in)
-				if result.Outcome != "succeeded" {
-					t.Fatalf("real DSC failed: %+v; stderr: %s", result.Error, result.Stderr)
+				result, err := session.Execute(context.Background(), in)
+				if err != nil || result.Outcome != "succeeded" {
+					t.Fatalf("real DSC failed: %+v; session: %v", result.Error, err)
+				}
+				if result.ExitCode != nil || result.Stderr != "" {
+					t.Fatal("successful RPC synthesized per-operation process diagnostics")
 				}
 				var payload struct {
 					Results []struct {

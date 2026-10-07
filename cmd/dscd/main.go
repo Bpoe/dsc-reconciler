@@ -42,7 +42,9 @@ func run(ctx context.Context, args []string, output io.Writer, logger *slog.Logg
 		return nil
 	}
 	client := dsc.NewClient(options.DSCPath, options.ExecutionTimeout)
-	loop := reconcile.New(options.ConfigDir, options.Interval, client, writer, logger)
+	loop := reconcile.New(options.ConfigDir, options.Interval, func(ctx context.Context) (reconcile.DSC, error) {
+		return client.Start(ctx)
+	}, writer, logger)
 	logger.Info("dscd started", "config_path", options.ConfigDir, "result_path", options.ResultsDir,
 		"interval", options.Interval, "execution_timeout", options.ExecutionTimeout)
 	ready()

@@ -32,7 +32,7 @@ func Parse(args []string, output io.Writer) (Options, error) {
 	f.StringVar(&o.ResultsDir, "results-dir", results, "directory for latest results")
 	f.StringVar(&o.DSCPath, "dsc-path", "dsc", "DSC executable name or path")
 	f.DurationVar(&o.Interval, "interval", 5*time.Minute, "delay after each completed reconciliation pass (positive)")
-	f.DurationVar(&o.ExecutionTimeout, "execution-timeout", 15*time.Minute, "maximum duration per document (positive)")
+	f.DurationVar(&o.ExecutionTimeout, "execution-timeout", 15*time.Minute, "maximum DSC request duration per document (positive)")
 	if err := f.Parse(args); err != nil {
 		return o, err
 	}

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,50 +12,191 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Bpoe/dsc-reconciler/internal/dsc"
+	"github.com/Bpoe/dsc-reconciler/internal/reconcile"
+	"github.com/Bpoe/dsc-reconciler/internal/results"
 )
 
 func TestMain(m *testing.M) {
 	if os.Getenv("DSCD_TEST_RESULT_PROCESS") == "1" {
-		args := os.Args[1:]
-		if len(args) == 0 || args[0] != "config" {
-			os.Exit(2)
-		}
-		args = args[1:]
-		parameters := ""
-		if len(args) >= 2 && args[0] == "--parameters-file" {
-			parameters = args[1]
-			args = args[2:]
-		}
-		if len(args) != 5 || !slices.Equal(args[:2], []string{"set", "--file"}) ||
-			!slices.Equal(args[3:], []string{"--output-format", "json"}) {
-			os.Exit(2)
-		}
-		document, err := os.ReadFile(args[2])
-		if err != nil {
-			os.Exit(3)
-		}
-		if string(document) == "invalid output" {
-			fmt.Print("invalid JSON")
-		} else {
-			data, err := os.ReadFile(parameters)
-			if err != nil || filepath.Base(parameters) != "20-success.parameters.yaml" || string(data) != "private-sidecar-value" {
-				os.Exit(4)
-			}
-			fmt.Print(`{"metadata":{},"results":[],"messages":[],"hadErrors":false}`)
-		}
-		os.Exit(0)
+		os.Exit(resultServer())
 	}
 	if os.Getenv("DSCD_TEST_DAEMON") == "1" {
 		main()
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
+}
+
+func TestRealProcessPerPassAndRecovery(t *testing.T) {
+	for _, test := range []struct {
+		mode    string
+		servers int
+		outcome string
+	}{
+		{"success", 1, "succeeded"}, {"normal failure", 1, "failed"},
+		{"invalid output", 2, "failed"}, {"exit", 2, "failed"}, {"hang", 2, "canceled"},
+	} {
+		t.Run(test.mode, func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, "inputs")
+			if err := os.Mkdir(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			for name, text := range map[string]string{"a.yaml": test.mode, "b.yaml": "success", "c.json": "success"} {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			lifetime := filepath.Join(root, "lifetimes")
+			t.Setenv("DSCD_TEST_RESULT_PROCESS", "1")
+			t.Setenv("DSCD_SERVER_LIFETIME", lifetime)
+			executable, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := dsc.NewClient(executable, 2*time.Second)
+			writer, err := results.NewWriter(filepath.Join(root, "results"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var logs bytes.Buffer
+			loop := reconcile.New(dir, time.Second, func(ctx context.Context) (reconcile.DSC, error) { return client.Start(ctx) }, writer, slog.New(slog.NewJSONHandler(&logs, nil)))
+			var previousPID int
+			for pass := 1; pass <= 2; pass++ {
+				if err := loop.Pass(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				var pids []int
+				for _, name := range []string{"a.yaml", "b.yaml", "c.json"} {
+					path, _ := writer.Destination(name)
+					data, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var result dsc.Result
+					if err := json.Unmarshal(data, &result); err != nil {
+						t.Fatal(err)
+					}
+					expected := "succeeded"
+					if name == "a.yaml" {
+						expected = test.outcome
+					}
+					if result.Outcome != expected || result.InputHash == "" {
+						t.Fatalf("%s: %+v", name, result)
+					}
+					if result.Outcome == "succeeded" {
+						if result.ExitCode != nil || result.Stderr != "" {
+							t.Fatal("fabricated process diagnostics")
+						}
+						var payload struct {
+							Metadata struct {
+								PID int `json:"serverPID"`
+							} `json:"metadata"`
+						}
+						if err := json.Unmarshal(result.DSCResult, &payload); err != nil {
+							t.Fatal(err)
+						}
+						pids = append(pids, payload.Metadata.PID)
+					}
+				}
+				if pids[len(pids)-1] != pids[len(pids)-2] || pids[len(pids)-1] == previousPID {
+					t.Fatalf("session not reused within pass or retained between passes: %v", pids)
+				}
+				previousPID = pids[len(pids)-1]
+				data, err := os.ReadFile(lifetime)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Count(string(data), "start ") != pass*test.servers {
+					t.Fatalf("unexpected server count: %s", data)
+				}
+				if test.servers == 1 && strings.Count(string(data), "stop ") != pass {
+					t.Fatalf("server didn't stop after pass: %s", data)
+				}
+				if strings.Contains(logs.String(), "private-sidecar-value") {
+					t.Fatal("JSON-RPC diagnostic leaked to routine logs")
+				}
+			}
+		})
+	}
+}
+
+func resultServer() int {
+	if len(os.Args) != 2 || os.Args[1] != "server" {
+		return 2
+	}
+	if path := os.Getenv("DSCD_SERVER_LIFETIME"); path != "" {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			return 3
+		}
+		fmt.Fprintf(f, "start %d\n", os.Getpid())
+		f.Close()
+		defer func() {
+			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+			if err == nil {
+				fmt.Fprintf(f, "stop %d\n", os.Getpid())
+				f.Close()
+			}
+		}()
+	}
+	scanner := bufio.NewScanner(os.Stdin)
+	encoder := json.NewEncoder(os.Stdout)
+	for scanner.Scan() {
+		var req struct {
+			ID     uint64 `json:"id"`
+			Method string `json:"method"`
+			Params struct {
+				Arguments struct {
+					Configuration string  `json:"configuration"`
+					Parameters    *string `json:"parameters"`
+				} `json:"arguments"`
+			} `json:"params"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &req) != nil {
+			return 4
+		}
+		if req.Method == "notifications/initialized" {
+			continue
+		}
+		if req.Method == "initialize" {
+			if os.Getenv("DSCD_TEST_INIT_FAILURE") == "1" {
+				fmt.Println("invalid initialize response")
+				continue
+			}
+			encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{
+				"protocolVersion": "2024-11-05", "capabilities": map[string]any{"tools": map[string]any{}},
+				"serverInfo": map[string]string{"name": "fake", "version": "1"},
+			}})
+			continue
+		}
+		switch req.Params.Arguments.Configuration {
+		case "invalid output":
+			fmt.Println("invalid JSON")
+			continue
+		case "normal failure":
+			encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": -32602, "message": "private-sidecar-value"}})
+			continue
+		case "exit":
+			return 7
+		case "hang":
+			for {
+				time.Sleep(time.Hour)
+			}
+		}
+		if req.Params.Arguments.Parameters != nil && *req.Params.Arguments.Parameters != "private-sidecar-value" {
+			return 5
+		}
+		encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{
+			"structuredContent": map[string]any{"result": map[string]any{"metadata": map[string]any{"serverPID": os.Getpid()}, "results": []any{}, "messages": []any{}, "hadErrors": false}},
+		}})
+	}
+	return 0
 }
 
 func TestEndToEndPublicationAndContinuation(t *testing.T) {
@@ -174,5 +317,55 @@ func TestShutdownBound(t *testing.T) {
 	<-finished
 	if err == nil {
 		t.Fatal("blocked shutdown was reported as successful")
+	}
+}
+
+func TestServerInitializationFailurePublished(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "inputs")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a.yaml", "b.json"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("success"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lifetime := filepath.Join(root, "lifetime")
+	t.Setenv("DSCD_TEST_RESULT_PROCESS", "1")
+	t.Setenv("DSCD_TEST_INIT_FAILURE", "1")
+	t.Setenv("DSCD_SERVER_LIFETIME", lifetime)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := dsc.NewClient(executable, 5*time.Second)
+	writer, err := results.NewWriter(filepath.Join(root, "results"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop := reconcile.New(dir, time.Second, func(ctx context.Context) (reconcile.DSC, error) {
+		return client.Start(ctx)
+	}, writer, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	if err := loop.Pass(context.Background()); err == nil {
+		t.Fatal("initialization failure not reported")
+	}
+	for _, name := range []string{"a.yaml", "b.json"} {
+		path, _ := writer.Destination(name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var result dsc.Result
+		if err := json.Unmarshal(data, &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Outcome != "failed" || result.Error == nil || result.Error.Kind != "start" {
+			t.Fatalf("missing startup failure: %+v", result)
+		}
+	}
+	data, err := os.ReadFile(lifetime)
+	if err != nil || strings.Count(string(data), "start ") != 1 {
+		t.Fatalf("retried startup in pass: %s %v", data, err)
 	}
 }
