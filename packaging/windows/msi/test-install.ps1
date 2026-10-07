@@ -135,7 +135,7 @@ try {
             Assert $rejected 'service startup rejects missing DSC on PATH'
             $service.WaitForStatus('Stopped', [timespan]::FromSeconds(40))
             $failures = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'dscd'; StartTime = $missingStarted })
-            Assert ($failures.Message -match 'resolve DSC executable') 'missing DSC produces an actionable startup error'
+            Assert (@($failures.Message -match 'resolve DSC executable').Count -gt 0) 'missing DSC produces an actionable startup error'
         }
         finally { Move-Item -LiteralPath $hiddenExecutable -Destination $dscExecutable }
         Start-Service dscd
