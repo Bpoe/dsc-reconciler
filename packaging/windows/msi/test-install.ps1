@@ -5,15 +5,23 @@ param(
     [string] $UpgradeMsiPath,
     [switch] $Disposable
 )
+
 $ErrorActionPreference = 'Stop'
-if (-not $IsWindows -or -not $Disposable) { throw 'Requires Windows and explicit -Disposable consent.' }
+if (-not $IsWindows -or -not $Disposable) {
+    throw 'Requires Windows and explicit -Disposable consent.'
+}
+
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Run as administrator on a disposable Windows runner.'
 }
+
 $MsiPath = (Resolve-Path -LiteralPath $MsiPath).Path
-if ($UpgradeMsiPath) { $UpgradeMsiPath = (Resolve-Path -LiteralPath $UpgradeMsiPath).Path }
+if ($UpgradeMsiPath) {
+    $UpgradeMsiPath = (Resolve-Path -LiteralPath $UpgradeMsiPath).Path
+}
+
 # Check only the machine PATH, excluding interactive-user executable aliases.
 # The runner must provision this PATH for LocalSystem before invoking the test.
 $originalPath = $env:PATH
@@ -21,13 +29,20 @@ try {
     $env:PATH = [Environment]::GetEnvironmentVariable('PATH', 'Machine')
     $dscExecutable = (Get-Command dsc.exe -CommandType Application -ErrorAction Stop).Source
 }
-finally { $env:PATH = $originalPath }
+finally {
+    $env:PATH = $originalPath
+}
+
 $dscVersionOutput = & $dscExecutable --version
-if ($LASTEXITCODE -ne 0) { throw 'The supplied DSC executable does not run.' }
+if ($LASTEXITCODE -ne 0) {
+    throw 'The supplied DSC executable does not run.'
+}
+
 $match = [regex]::Match(($dscVersionOutput -join ' '), '\b(\d+\.\d+\.\d+)\b')
 if (-not $match.Success -or [version]$match.Groups[1].Value -lt [version]'3.3.0') {
     throw 'Smoke tests require actual Microsoft DSC 3.3.0 or later, supplied by CI, not the installer.'
 }
+
 $programFiles = [Environment]::GetFolderPath('ProgramFiles')
 $data = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'dsc'
 $binary = Join-Path $programFiles 'dscd\dscd.exe'
@@ -41,6 +56,7 @@ if ((Get-Service dscd -ErrorAction SilentlyContinue) -or
     (Test-Path (Split-Path $binary)) -or (Test-Path $data)) {
     throw 'Refusing to test on a machine with existing dscd installation or data.'
 }
+
 $logDirectory = Join-Path $PSScriptRoot ("test-output/" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 $installedMsi = $null
@@ -48,8 +64,11 @@ $currentMsi = $MsiPath
 $started = Get-Date
 
 function Assert([bool] $Condition, [string] $Message) {
-    if (-not $Condition) { throw "MSI smoke test: $Message" }
+    if (-not $Condition) {
+        throw "MSI smoke test: $Message"
+    }
 }
+
 function Invoke-Msi([string[]] $Arguments, [string] $LogName, [int] $Expected = 0) {
     $log = Join-Path $logDirectory "$LogName.log"
     $process = Start-Process msiexec.exe -ArgumentList ($Arguments + @('/qn', '/norestart', '/l*v', "`"$log`"")) -WindowStyle Hidden -PassThru
@@ -60,8 +79,11 @@ function Invoke-Msi([string[]] $Arguments, [string] $LogName, [int] $Expected = 
         }
         Assert ($process.ExitCode -eq $Expected) "msiexec exit $($process.ExitCode), expected $Expected; log: $log"
     }
-    finally { $process.Dispose() }
+    finally {
+        $process.Dispose()
+    }
 }
+
 function Assert-ACL([string] $Path) {
     $acl = Get-Acl -LiteralPath $Path
     Assert $acl.AreAccessRulesProtected "inheritance disabled on $Path"
@@ -75,13 +97,19 @@ function Assert-ACL([string] $Path) {
             ($rule[0].InheritanceFlags -band [Security.AccessControl.InheritanceFlags]::ObjectInherit)) "full inheritable control for $sid on $Path"
     }
 }
+
 function Assert-Installed {
     Assert (Test-Path -LiteralPath $binary -PathType Leaf) 'installed executable'
     Assert (Test-Path -LiteralPath $license -PathType Leaf) 'installed MIT license'
     Assert ((Get-Content -Raw -LiteralPath $license).StartsWith('MIT License')) 'repository MIT notice'
     $service = Get-Service dscd
-    try { $service.WaitForStatus('Running', [timespan]::FromSeconds(30)) }
-    finally { $service.Dispose() }
+    try {
+        $service.WaitForStatus('Running', [timespan]::FromSeconds(30))
+    }
+    finally {
+        $service.Dispose()
+    }
+
     $registration = Get-CimInstance Win32_Service -Filter "Name='dscd'"
     Assert ($registration.StartName -eq 'LocalSystem' -and $registration.StartMode -eq 'Auto') 'LocalSystem automatic startup'
     $expectedCommand = '"{0}" -config-dir "{1}\." -results-dir "{2}\."' -f $binary, $config, $results
@@ -104,6 +132,7 @@ function Assert-Installed {
             [BitConverter]::ToUInt32($failureActions, $offset + $index * 8 + 4) -eq 5000) 'restart after five seconds'
     }
 }
+
 function Assert-Uninstalled {
     Assert (-not (Get-Service dscd -ErrorAction SilentlyContinue)) 'service removed'
     Assert (-not (Test-Path -LiteralPath $binary)) 'executable removed'
@@ -112,7 +141,10 @@ function Assert-Uninstalled {
     Assert (-not (Test-Path $settingsKey)) 'MSI settings removed'
     Assert ((Get-Content -Raw -LiteralPath (Join-Path $config 'retained.txt')) -ceq 'configuration marker') 'configuration data preserved'
     Assert ((Get-Content -Raw -LiteralPath (Join-Path $results 'retained.txt')) -ceq 'result marker') 'result data preserved'
-    foreach ($directory in @($data, $config, $results)) { Assert-ACL $directory }
+    foreach ($directory in @($data, $config, $results)) {
+        Assert-ACL $directory
+    }
+
     Assert (Test-Path -LiteralPath $dscExecutable) 'DSC left installed'
 }
 
@@ -131,17 +163,29 @@ try {
         try {
             $missingStarted = Get-Date
             $rejected = $false
-            try { Start-Service dscd -ErrorAction Stop } catch { $rejected = $true }
+            try {
+                Start-Service dscd -ErrorAction Stop
+            }
+            catch {
+                $rejected = $true
+            }
+
             Assert $rejected 'service startup rejects missing DSC on PATH'
             $service.WaitForStatus('Stopped', [timespan]::FromSeconds(40))
             $failures = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'dscd'; StartTime = $missingStarted })
             Assert (@($failures.Message -match 'resolve DSC executable').Count -gt 0) 'missing DSC produces an actionable startup error'
         }
-        finally { Move-Item -LiteralPath $hiddenExecutable -Destination $dscExecutable }
+        finally {
+            Move-Item -LiteralPath $hiddenExecutable -Destination $dscExecutable
+        }
+
         Start-Service dscd
         $service.WaitForStatus('Running', [timespan]::FromSeconds(30))
     }
-    finally { $service.Dispose() }
+    finally {
+        $service.Dispose()
+    }
+
     $oldProcess = (Get-CimInstance Win32_Service -Filter "Name='dscd'").ProcessId
     Stop-Process -Id $oldProcess -Force
     $deadline = [Diagnostics.Stopwatch]::StartNew()
@@ -166,8 +210,13 @@ try {
                 $view = $db.OpenView("SELECT ``Value`` FROM ``Property`` WHERE ``Property``='$name'")
                 $view.Execute()
                 $record = $view.Fetch()
-                if ($name -eq 'ProductVersion') { $versions += [version]$record.StringData(1) }
-                else { $codes += $record.StringData(1) }
+                if ($name -eq 'ProductVersion') {
+                    $versions += [version]$record.StringData(1)
+                }
+                else {
+                    $codes += $record.StringData(1)
+                }
+
                 [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($record)
                 $view.Close()
                 [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($view)
@@ -180,8 +229,13 @@ try {
         # proves replacement even when both test MSIs were built from one binary.
         Stop-Service dscd
         $service = Get-Service dscd
-        try { $service.WaitForStatus('Stopped', [timespan]::FromSeconds(40)) }
-        finally { $service.Dispose() }
+        try {
+            $service.WaitForStatus('Stopped', [timespan]::FromSeconds(40))
+        }
+        finally {
+            $service.Dispose()
+        }
+
         [IO.File]::AppendAllText($binary, "MSI upgrade replacement probe $([guid]::NewGuid())")
         $oldFingerprint = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash
         Start-Service dscd
@@ -218,7 +272,10 @@ try {
     Write-Output "MSI prerequisite, install, recovery, repair, reinstall, and uninstall passed. Logs: $logDirectory"
 }
 finally {
-    if ($installedMsi) { Invoke-Msi @('/x', "`"$installedMsi`"") 'cleanup-uninstall' }
+    if ($installedMsi) {
+        Invoke-Msi @('/x', "`"$installedMsi`"") 'cleanup-uninstall'
+    }
+
     # Logs and retained data are intentionally left on this disposable machine.
     # No recursive deletion or machine-state reversal is part of the installer.
 }

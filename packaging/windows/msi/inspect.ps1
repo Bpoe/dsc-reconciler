@@ -3,14 +3,23 @@ param(
     [Parameter(Mandatory)][string] $MsiPath,
     [Parameter(Mandatory)][string] $Version
 )
+
 $ErrorActionPreference = 'Stop'
-if (-not $IsWindows) { throw 'MSI inspection requires Windows Installer on Windows.' }
+
+if (-not $IsWindows) {
+    throw 'MSI inspection requires Windows Installer on Windows.'
+}
+
 $expectedVersion = & "$PSScriptRoot/version.ps1" -Version $Version
 $installer = New-Object -ComObject WindowsInstaller.Installer
 $database = $installer.OpenDatabase((Resolve-Path -LiteralPath $MsiPath).Path, 0)
+
 function Assert([bool] $Condition, [string] $Message) {
-    if (-not $Condition) { throw "MSI inspection: $Message" }
+    if (-not $Condition) {
+        throw "MSI inspection: $Message"
+    }
 }
+
 function Rows([string] $Sql, [string[]] $Columns) {
     $view = $database.OpenView($Sql)
     try {
@@ -23,7 +32,9 @@ function Rows([string] $Sql, [string[]] $Columns) {
                 }
                 [pscustomobject]$row
             }
-            finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($record) }
+            finally {
+                [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($record)
+            }
         }
     }
     finally {
@@ -31,14 +42,22 @@ function Rows([string] $Sql, [string[]] $Columns) {
         [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($view)
     }
 }
+
 try {
     $summary = $database.SummaryInformation(0)
-    try { Assert ($summary.Property(7) -eq 'x64;1033') 'package must target x64' }
-    finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($summary) }
+
+    try {
+        Assert ($summary.Property(7) -eq 'x64;1033') 'package must target x64'
+    }
+    finally {
+        [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($summary)
+    }
+
     $properties = @{}
     foreach ($row in (Rows 'SELECT `Property`, `Value` FROM `Property`' @('Name', 'Value'))) {
         $properties[$row.Name] = $row.Value
     }
+
     Assert ($properties.ProductName -eq 'DSC Reconciliation Daemon') 'product name'
     Assert ($properties.Manufacturer -eq 'dsc-reconciler contributors') 'publisher'
     Assert ($properties.ProductVersion -eq $expectedVersion) 'product version'
@@ -46,16 +65,20 @@ try {
     Assert ($properties.ALLUSERS -eq '1') 'per-machine installation'
     Assert ($properties.ARPCOMMENTS -eq "dscd $Version") 'human-readable release version'
     $tables = @(Rows 'SELECT `Name` FROM `_Tables`' @('Name'))
+
     foreach ($table in @('AppSearch', 'DrLocator', 'RegLocator', 'Signature', 'Environment')) {
         Assert ($table -notin $tables.Name) "no prerequisite discovery or PATH modification ($table)"
     }
+
     foreach ($name in @($properties.Keys) + ($properties.SecureCustomProperties -split ';')) {
         Assert ($name -notmatch '(?i)dsc') "no DSC path property ($name)"
     }
+
     foreach ($row in (Rows 'SELECT `Condition` FROM `LaunchCondition`' @('Condition'))) {
         Assert ($row.Condition.Length -le 255) 'launch conditions fit the MSI column limit'
         Assert ($row.Condition -notmatch '(?i)dsc') 'no DSC prerequisite launch condition'
     }
+
     $files = @(Rows 'SELECT `File`, `Component_`, `FileName`, `Version`, `Language` FROM `File`' @('Id', 'Component', 'Name', 'Version', 'Language'))
     Assert ($files.Count -eq 2) 'only dscd.exe and LICENSE must be packaged'
     $executable = @($files | Where-Object Id -eq 'DaemonFile')
@@ -77,6 +100,7 @@ try {
         Assert ($dir.Count -eq 1 -and $dir[0].Parent -eq $expected[1] -and
             ($dir[0].Name -split '\|')[-1] -eq $expected[2]) "directory $($expected[0])"
     }
+
     $components = @(Rows 'SELECT `Component`, `Directory_`, `Attributes`, `KeyPath` FROM `Component`' @('Id', 'Directory', 'Attributes', 'KeyPath'))
     $daemon = @($components | Where-Object Id -eq 'Daemon')
     Assert ($daemon.Count -eq 1 -and $daemon[0].Directory -eq 'INSTALLFOLDER' -and
@@ -84,6 +108,7 @@ try {
     $licenseComponent = @($components | Where-Object Id -eq 'License')
     Assert ($licenseComponent.Count -eq 1 -and $licenseComponent[0].Directory -eq 'INSTALLFOLDER' -and
         $licenseComponent[0].KeyPath -eq 'LicenseFile') 'license installed alongside executable'
+
     foreach ($id in @('DataDirectory', 'ConfigDirectory', 'ResultsDirectory')) {
         $component = @($components | Where-Object Id -eq $id)
         Assert ($component.Count -eq 1 -and ([int]$component[0].Attributes -band 16)) "permanent $id"
@@ -116,23 +141,27 @@ try {
     $installPermission = @($permissions | Where-Object Object -eq 'INSTALLFOLDER')
     Assert ($installPermission.Count -eq 1 -and $installPermission[0].Table -eq 'CreateFolder' -and
         $installPermission[0].SDDL -ceq 'O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)') 'protected executable directory'
+
     foreach ($id in @('DATAFOLDER', 'CONFIGFOLDER', 'RESULTSFOLDER')) {
         $permission = @($permissions | Where-Object Object -eq $id)
         Assert ($permission.Count -eq 1 -and $permission[0].Table -eq 'CreateFolder' -and
             $permission[0].SDDL -ceq 'O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)') "protected ACL $id"
     }
+
     $registry = @(Rows 'SELECT `Root`, `Key`, `Name`, `Value` FROM `Registry`' @('Root', 'Key', 'Name', 'Value'))
     $eventKey = 'SYSTEM\CurrentControlSet\Services\EventLog\Application\dscd'
     foreach ($entry in @(@('EventMessageFile', '#%[System64Folder]EventCreate.exe'), @('TypesSupported', '#7'), @('CustomSource', '#1'))) {
         $value = @($registry | Where-Object { $_.Root -eq '2' -and $_.Key -eq $eventKey -and $_.Name -eq $entry[0] })
         Assert ($value.Count -eq 1 -and $value[0].Value -ceq $entry[1]) "Event Log $($entry[0])"
     }
+
     Assert (@($registry | Where-Object { $_.Key -ne $eventKey }).Count -eq 0) 'only Event Log registry entries; no DSC path persistence'
     Assert ('Settings' -notin $components.Id) 'no DSC settings component'
     $actions = @(Rows 'SELECT `Action`, `Type`, `Target` FROM `CustomAction`' @('Name', 'Type', 'Target'))
     foreach ($action in $actions) {
         Assert ($action.Target -in @('SchedServiceConfig', 'ExecServiceConfig', 'RollbackServiceConfig')) "unexpected custom action $($action.Name)"
     }
+
     Write-Output "MSI metadata, contents, service, recovery, Event Log, and ACL inspection passed: $MsiPath"
 }
 catch {

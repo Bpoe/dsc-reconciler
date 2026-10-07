@@ -1,12 +1,15 @@
 #Requires -RunAsAdministrator
 # Opt-in integration test for disposable CI machines, never invoked by go test.
 [CmdletBinding()]
-param([Parameter(Mandatory)][string] $BinaryPath)
+param(
+    [Parameter(Mandatory)][string] $BinaryPath
+)
 
 $ErrorActionPreference = 'Stop'
 if ((Get-Service -Name dscd -ErrorAction SilentlyContinue) -or [Diagnostics.EventLog]::SourceExists('dscd')) {
     throw 'Refusing to test on a machine with an existing dscd service or event source.'
 }
+
 $root = Join-Path ([IO.Path]::GetTempPath()) ('dscd service test ' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $root | Out-Null
 $binary = Join-Path $root 'daemon with spaces.exe'
@@ -25,10 +28,12 @@ try {
         $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(40))
         $service.Dispose()
     }
+
     $events = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'dscd' } -MaxEvents 10)
     if (-not ($events.Message -match 'dscd started') -or -not ($events.Message -match 'dscd stopped')) {
         throw 'Expected lifecycle events were not published.'
     }
+
     Write-Output 'SCM installation, start, stop, restart and Event Log integration passed.'
 }
 finally {
@@ -38,6 +43,7 @@ finally {
     elseif ([Diagnostics.EventLog]::SourceExists('dscd')) {
         [Diagnostics.EventLog]::DeleteEventSource('dscd')
     }
+
     # The exact GUID-named directory was created above and contains only this test's files.
     Remove-Item -LiteralPath $root -Recurse -Force
 }
