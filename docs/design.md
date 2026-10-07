@@ -565,3 +565,8 @@ This is not native Linux hardware, general DSC resource or power-loss validation
 Actual service installation, host-shutdown delivery and other DSC/resource compatibility must
 still be verified in a disposable deployment environment; CI definitions are
 not evidence of an already completed CI run.
+Native DEB/RPM build and artifact inspection passed locally, including ownership,
+permissions, unit verification and prerelease ordering. Disposable Ubuntu/Fedora
+containers with DSC 3.3.0 exercised package lifecycle and data preservation
+without running systemd, including DEB purge. This does not establish service
+startup or real DSC resource execution.

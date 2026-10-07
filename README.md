@@ -97,7 +97,8 @@ Without that variable, normal tests skip real DSC execution.
 ### Build Linux packages
 
 On Linux AMD64, install nFPM **v2.47.0** as a build tool (not a daemon dependency)
-and ensure `dpkg-deb`, `rpm`, `rpm2cpio`, `cpio` and `systemd-analyze` are available:
+and ensure `dpkg-deb`, `rpm`, `rpm2archive` and `systemd-analyze` are available
+(Ubuntu's `rpm` package supplies `rpm2archive` via its dependencies):
 
 ```sh
 go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
@@ -471,6 +472,11 @@ and the in-memory SCM lifecycle are covered.
 Actual service registration and system shutdown were **not** exercised on this
 shared machine. The manual service-integration workflow provides disposable
 systemd/SCM smoke checks; its presence does not establish a completed run.
+Native DEB/RPM builds, metadata, permissions, prerelease ordering and extracted
+systemd units were verified locally. With Microsoft DSC 3.3.0 installed,
+disposable Ubuntu/Fedora containers exercised installation, upgrade, reinstall,
+removal, data/permission preservation and Debian purge without running systemd.
+Those checks do not validate service startup.
 The opt-in Echo server test on Windows with DSC `3.3.0` passed for YAML/JSON
 configurations with no sidecar and with either inline parameter format in one
 initialized session. Other resources,

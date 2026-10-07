@@ -9,15 +9,13 @@ for directory in /etc/dsc/config.d /var/lib/dsc/results.d; do
 done
 
 deb-systemd-helper unmask dscd.service >/dev/null
-if [ -z "${2:-}" ]; then
+action=try-restart
+if ! deb-systemd-helper debian-installed dscd.service; then
     deb-systemd-helper enable dscd.service >/dev/null
+    action=start
 fi
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload
-    if [ -z "${2:-}" ]; then
-        deb-systemd-invoke start dscd.service
-    else
-        # Unlike restart, try-restart respects an administrator-stopped service.
-        deb-systemd-invoke try-restart dscd.service
-    fi
+    # Unlike restart, try-restart respects an administrator-stopped service.
+    deb-systemd-invoke "$action" dscd.service
 fi

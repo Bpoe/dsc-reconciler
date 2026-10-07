@@ -32,8 +32,9 @@ remove_package() {
     esac
 }
 assert_running() {
-    systemctl is-enabled --quiet dscd.service
+    [[ -L /etc/systemd/system/multi-user.target.wants/dscd.service ]]
     if "$systemd_running"; then
+        systemctl is-enabled --quiet dscd.service
         systemctl is-active --quiet dscd.service
         [[ $(systemctl show -p User --value dscd.service) == root ]]
         [[ $(systemctl show -p FragmentPath --value dscd.service) == */systemd/system/dscd.service ]]
@@ -48,17 +49,15 @@ assert_running() {
     fi
 }
 assert_preserved() {
-    [[ $(cat /etc/dsc/config.d/.package-smoke) == config ]]
-    [[ $(cat /var/lib/dsc/results.d/.package-smoke) == result ]]
+    [[ $(cat /etc/dsc/config.d/.package-smoke.txt) == config ]]
+    [[ $(cat /var/lib/dsc/results.d/.package-smoke.txt) == result ]]
     [[ $(stat -c %a /etc/dsc/config.d) == 750 ]]
     [[ $(stat -c %a /var/lib/dsc/results.d) == 710 ]]
-    [[ $(stat -c %a /etc/dsc/config.d/.package-smoke) == 640 ]]
+    [[ $(stat -c %a /etc/dsc/config.d/.package-smoke.txt) == 640 ]]
 }
 assert_removed() {
-    if systemctl is-enabled --quiet dscd.service; then
-        echo "Removed service is still active or enabled" >&2
-        exit 1
-    fi
+    [[ ! -e /etc/systemd/system/multi-user.target.wants/dscd.service &&
+       ! -L /etc/systemd/system/multi-user.target.wants/dscd.service ]]
     if "$systemd_running" && systemctl is-active --quiet dscd.service; then exit 1; fi
     [[ ! -e /usr/bin/dscd && ! -e /usr/lib/systemd/system/dscd.service ]]
     [[ -x /usr/bin/dsc ]]
@@ -70,11 +69,11 @@ assert_running
 for directory in /etc/dsc/config.d /var/lib/dsc/results.d; do
     [[ $(stat -c '%U:%G %a' "$directory") == 'root:root 700' ]]
 done
-printf config > /etc/dsc/config.d/.package-smoke
-printf result > /var/lib/dsc/results.d/.package-smoke
+printf config > /etc/dsc/config.d/.package-smoke.txt
+printf result > /var/lib/dsc/results.d/.package-smoke.txt
 chmod 750 /etc/dsc/config.d
 chmod 710 /var/lib/dsc/results.d
-chmod 640 /etc/dsc/config.d/.package-smoke
+chmod 640 /etc/dsc/config.d/.package-smoke.txt
 if "$systemd_running"; then
     systemctl stop dscd.service
     if systemctl is-active --quiet dscd.service; then exit 1; fi
@@ -104,7 +103,7 @@ assert_preserved
 if "$systemd_running"; then systemctl stop dscd.service; fi
 install_package "$newer"
 if "$systemd_running" && systemctl is-active --quiet dscd.service; then exit 1; fi
-systemctl is-enabled --quiet dscd.service
+[[ -L /etc/systemd/system/multi-user.target.wants/dscd.service ]]
 assert_preserved
 remove_package
 assert_removed

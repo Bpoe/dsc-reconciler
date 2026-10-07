@@ -52,7 +52,7 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y rpm cpio
+          sudo apt-get install -y rpm
           GOBIN="$RUNNER_TEMP/package-tools" go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
           echo "$RUNNER_TEMP/package-tools" >> "$GITHUB_PATH"
       - name: Build and inspect Linux packages (no installation)

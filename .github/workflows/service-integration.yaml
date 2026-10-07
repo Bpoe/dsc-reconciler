@@ -32,7 +32,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y rpm cpio
+          sudo apt-get install -y rpm
           GOBIN="$RUNNER_TEMP/package-tools" go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
           export PATH="$RUNNER_TEMP/package-tools:$PATH"
           for version in v0.0.0-rc.1 v0.0.0; do
