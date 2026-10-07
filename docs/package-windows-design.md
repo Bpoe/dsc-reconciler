@@ -455,7 +455,9 @@ Where practical, also test:
 
 * Reinstall after uninstall.
 * Upgrade from an earlier test MSI.
-* Missing DSC causes service-start failure and rollback, without MSI discovery.
+* A direct service restart with missing DSC fails and logs a resolution error.
+  Do not rely on an MSI prerequisite rejection: native StartServices can wait
+  beyond the test timeout when DSC is absent.
 * DSC lookup through a machine PATH directory containing spaces.
 
 Keep the tests proportional to the project’s size.

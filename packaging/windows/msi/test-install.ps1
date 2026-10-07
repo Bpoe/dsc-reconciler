@@ -117,15 +117,6 @@ function Assert-Uninstalled {
 }
 
 try {
-    # Missing DSC fails at service startup, without installer discovery actions.
-    # Hide the fixture on this disposable machine and always restore it.
-    $hiddenExecutable = "$dscExecutable.unavailable"
-    Move-Item -LiteralPath $dscExecutable -Destination $hiddenExecutable
-    try {
-        Invoke-Msi @('/i', "`"$MsiPath`"") 'missing-dsc-startup' 1603
-        Assert (-not (Get-Service dscd -ErrorAction SilentlyContinue)) 'failed service startup rolls back registration'
-    }
-    finally { Move-Item -LiteralPath $hiddenExecutable -Destination $dscExecutable }
     Invoke-Msi @('/i', "`"$MsiPath`"") 'install'
     $installedMsi = $MsiPath
     Assert-Installed
@@ -133,6 +124,20 @@ try {
     try {
         Stop-Service dscd
         $service.WaitForStatus('Stopped', [timespan]::FromSeconds(40))
+        # Verify missing DSC at the service boundary. A negative MSI install can
+        # remain in native StartServices beyond the test's two-minute limit.
+        $hiddenExecutable = "$dscExecutable.unavailable"
+        Move-Item -LiteralPath $dscExecutable -Destination $hiddenExecutable
+        try {
+            $missingStarted = Get-Date
+            $rejected = $false
+            try { Start-Service dscd -ErrorAction Stop } catch { $rejected = $true }
+            Assert $rejected 'service startup rejects missing DSC on PATH'
+            $service.WaitForStatus('Stopped', [timespan]::FromSeconds(40))
+            $failures = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'dscd'; StartTime = $missingStarted })
+            Assert ($failures.Message -match 'resolve DSC executable') 'missing DSC produces an actionable startup error'
+        }
+        finally { Move-Item -LiteralPath $hiddenExecutable -Destination $dscExecutable }
         Start-Service dscd
         $service.WaitForStatus('Running', [timespan]::FromSeconds(30))
     }

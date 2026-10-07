@@ -460,6 +460,9 @@ PATH, validate the DSC version, download DSC or install resources. It uses
 startup to fail; MSI installation then fails through its normal service-start
 handling, without a custom prerequisite message. Inspect the MSI log and the
 Application Event Log for details.
+This failure need not be prompt: an installation without DSC exceeded the smoke
+test's two-minute limit waiting in Windows Installer's service-start action.
+Provision the prerequisite before running the MSI.
 Go, WiX and PowerShell are not required on the target machine.
 
 The MSI installs `%ProgramFiles%\dscd\dscd.exe`, registers **dscd**

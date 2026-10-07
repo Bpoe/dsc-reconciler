@@ -547,6 +547,9 @@ existing startup validation resolves the default executable name `dsc` through
 the service process's PATH/PATHEXT. If resolution fails, the service fails to
 start and installation fails through native MSI service-start handling; there
 is no custom prerequisite launch condition or tailored MSI discovery error.
+An installation without DSC exceeded the smoke test's two-minute limit in native
+`StartServices`; do not depend on a prompt prerequisite rejection or bounded
+rollback time. Provision and verify the service environment before installation.
 Service, registry, directory and ACL operations remain declarative.
 
 Native service tables own `dscd`, display name `DSC Reconciliation Daemon`,
@@ -616,7 +619,8 @@ The runner exposes the extracted DSC executable through a symlink in an existing
 machine PATH directory containing spaces, avoiding reliance on a newly edited
 PATH reaching the already-running SCM. This is disposable test setup only;
 the MSI does not create that link or change the environment. The test also hides
-the fixture temporarily to verify missing-DSC startup failure and rollback.
+the fixture temporarily to verify a direct service restart fails with a DSC
+resolution error, then restores it before continuing the MSI lifecycle checks.
 The previous installer with explicit DSC paths passed native MSI checks in
 [service-integration run 37578288245](https://github.com/Bpoe/dsc-reconciler/actions/runs/37578288245),
 including executable replacement, repair, reinstall, uninstall and data retention.
