@@ -70,36 +70,24 @@ dscd currently requires Microsoft DSC 3.3.0 or later because it uses the dsc ser
 
 DSC should remain a separately installed product.
 
-The MSI should:
+Before installing or starting dscd, the operator must install Microsoft DSC 3.3.0+
+and make dsc.exe available on the machine/system PATH visible to LocalSystem.
+The service uses dscd's existing default executable name, dsc, resolved at startup.
 
-1. Verify that a suitable DSC executable is available before starting the service.
-2. Use an absolute path to dsc.exe.
-3. Ensure that DSC is accessible to the LocalSystem service account.
-4. Provide a clear installation error when DSC cannot be found.
+An interactive user's PATH or a per-user WinGet/Store executable alias is insufficient.
+After changing the system PATH, reboot before installation/startup if needed so
+Windows services receive the updated environment. Verify DSC's version and ensure
+LocalSystem can execute it and access its resources. Protect the DSC installation,
+resources and PATH directories from unprivileged modification.
 
-Do not assume that an interactive user’s PATH is available to a Windows service.
+For example, an administrator can extract the official DSC Windows x64 archive
+to C:\Program Files\DSC and add that directory to the system PATH. This is an
+operator-selected location, not a discovery convention built into the MSI.
 
-Do not assume that a per-user WinGet installation is accessible to LocalSystem.
-
-Prefer a straightforward discovery mechanism for machine-wide installations.
-
-For example, recognize a machine-wide DSC installation at:
-
-C:\Program Files\DSC\dsc.exe
-
-if that is a valid installation convention.
-
-Also support an explicit public MSI property for specifying the executable path:
-
-msiexec /i dscd.msi DSC_PATH="C:\Tools\DSC\dsc.exe" /qn
-
-Use DSC_PATH consistently throughout the implementation.
-
-Verify how DSC is actually installed and distributed on Windows before finalizing the discovery behavior.
-
-Avoid complicated registry searches or custom installation code when a simpler mechanism is sufficient.
-
-Where practical, validate the DSC version. At minimum, verify the executable exists and document the required version.
+Do not add DSC path properties, file/directory/registry searches, prerequisite
+custom actions, version checks, saved DSC paths or PATH changes to the MSI.
+Missing DSC fails at daemon startup and uses normal MSI service-start failure
+and rollback handling, without a custom discovery error.
 
 Do not download DSC during installation.
 
@@ -130,12 +118,12 @@ The service command line should pass the necessary paths:
 
 -config-dir "[CommonAppDataFolder]dsc\config.d"
 -results-dir "[CommonAppDataFolder]dsc\results.d"
--dsc-path "<resolved absolute DSC executable path>"
 
 The daemon already defaults to:
 
 * Five-minute reconciliation interval.
 * Fifteen-minute per-configuration execution timeout.
+* DSC executable name dsc, resolved through the service's PATH/PATHEXT.
 
 Do not duplicate these defaults unnecessarily in the service command line.
 
@@ -225,7 +213,7 @@ Implement conventional Windows Installer behavior.
 
 Initial installation
 
-1. Check the DSC prerequisite.
+1. Require the operator to provision DSC on the LocalSystem-visible machine PATH beforehand.
 2. Install dscd.exe.
 3. Create the configuration and results directories.
 4. Apply directory permissions.
@@ -250,7 +238,7 @@ The upgrade should:
 4. Restart the service.
 5. Preserve configuration documents.
 6. Preserve reconciliation results.
-7. Preserve appropriate user-selected installation settings.
+7. Continue using the machine PATH for DSC without persisting a selected executable.
 
 Do not allow two service instances to run simultaneously during an upgrade.
 
@@ -313,6 +301,11 @@ dscd.exe
 Then use WiX to create the MSI.
 
 The installer should not compile Go source itself.
+
+Use the pinned WiX .NET SDK. Keep build.ps1 limited to version mapping, build
+arguments and dotnet build with its implicit restore. Run inspect.ps1 separately
+after building. Do not add a native helper, Visual C++ toolchain, developer-shell
+initialization or Windows SDK build dependency.
 
 Do not bundle development tools or source files.
 
@@ -416,6 +409,8 @@ At minimum, validate:
 * Service recovery behavior is configured.
 * Event Log registration is present.
 * Required directories and ACL definitions are included.
+* The service passes only config/results paths and uses the default DSC name.
+* No DSC discovery, saved path, helper custom action or PATH modification exists.
 
 Use suitable MSI inspection tools.
 
@@ -432,7 +427,7 @@ Do not run MSI installation tests as part of ordinary Go unit tests.
 The test should:
 
 1. Build or obtain the generated MSI.
-2. Make a suitable DSC executable available at a known machine-wide path.
+2. Make DSC 3.3.0+ available on the machine PATH already visible to LocalSystem.
 3. Install the MSI silently.
 4. Verify dscd.exe exists under Program Files.
 5. Verify the dscd service exists.
@@ -460,8 +455,8 @@ Where practical, also test:
 
 * Reinstall after uninstall.
 * Upgrade from an earlier test MSI.
-* Missing DSC prerequisite.
-* Installation with a DSC path containing spaces.
+* Missing DSC causes service-start failure and rollback, without MSI discovery.
+* DSC lookup through a machine PATH directory containing spaces.
 
 Keep the tests proportional to the project’s size.
 
@@ -509,7 +504,8 @@ Document:
 * Installing Microsoft DSC as a prerequisite.
 * Installing the MSI interactively.
 * Installing the MSI silently.
-* Specifying a custom DSC executable path.
+* Adding DSC to the machine/system PATH visible to LocalSystem before startup,
+  including the possible reboot after a PATH change.
 * Managing the Windows service.
 * Viewing Windows Event Log messages.
 * Deploying configuration documents.

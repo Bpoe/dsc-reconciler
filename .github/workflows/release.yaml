@@ -94,6 +94,7 @@ jobs:
           $msiOutput = Join-Path $env:RUNNER_TEMP 'msi-output'
           .\packaging\windows\msi\build.ps1 -Version $env:VERSION -BinaryPath $executable `
               -OutputDirectory $msiOutput -WixVersion $env:WIX_VERSION -AcceptWixEula
+          .\packaging\windows\msi\inspect.ps1 -MsiPath (Join-Path $msiOutput "$name.msi") -Version $env:VERSION
           Copy-Item (Join-Path $msiOutput "$name.msi") -Destination $dist
       - name: Build and package Linux
         if: runner.os == 'Linux'
@@ -179,4 +180,4 @@ jobs:
             dist/SHA256SUMS \
             --verify-tag --draft --prerelease \
             --title "dscd $VERSION" --generate-notes \
-            --notes "Built from $GITHUB_SHA. Linux amd64 DEB/RPM packages, Windows x64 MSI, and Linux/Windows amd64 archives include service assets and the MIT license. Native packages require Microsoft DSC >= 3.3.0 installed separately. Install resources separately. This workflow inspects packages; installation tests run separately in the manual service-integration workflow."
+            --notes "Built from $GITHUB_SHA. Linux amd64 DEB/RPM packages, Windows x64 MSI, and Linux/Windows amd64 archives include service assets and the MIT license. Native packages require Microsoft DSC >= 3.3.0 installed separately. On Windows, dsc.exe must be on the machine/system PATH visible to LocalSystem before installing dscd; reboot after PATH changes if needed. Install resources separately. This workflow inspects packages; installation tests run separately in the manual service-integration workflow."

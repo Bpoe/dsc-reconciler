@@ -1,8 +1,10 @@
 package config
 
 import (
+	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -90,5 +92,44 @@ func TestPrepareSymlinkAlias(t *testing.T) {
 	o := Options{ConfigDir: input, ResultsDir: filepath.Join(alias, "not-yet-created"), DSCPath: executable}
 	if o.Prepare() == nil {
 		t.Fatal("accepted nested output through alias")
+	}
+}
+
+func TestPrepareDefaultDSCFromPATH(t *testing.T) {
+	root := t.TempDir()
+	input := filepath.Join(root, "input")
+	bin := filepath.Join(root, "DSC with spaces")
+	for _, dir := range []string{input, bin} {
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin)
+	name := "dsc"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+		t.Setenv("PATHEXT", ".EXE")
+	}
+	options := func() Options {
+		o, err := Parse([]string{"-config-dir", input, "-results-dir", filepath.Join(root, "results")}, io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return o
+	}
+	o := options()
+	if err := o.Prepare(); !errors.Is(err, exec.ErrNotFound) {
+		t.Fatalf("missing DSC on PATH: %v", err)
+	}
+	executable := filepath.Join(bin, name)
+	if err := os.WriteFile(executable, []byte("test executable; never invoked"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	o = options()
+	if err := o.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	if o.DSCPath != executable {
+		t.Fatalf("DSCPath = %q, want %q", o.DSCPath, executable)
 	}
 }

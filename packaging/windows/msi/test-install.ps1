@@ -3,7 +3,6 @@
 param(
     [Parameter(Mandatory)][string] $MsiPath,
     [string] $UpgradeMsiPath,
-    [Parameter(Mandatory)][string] $DSCPath,
     [switch] $Disposable
 )
 $ErrorActionPreference = 'Stop'
@@ -15,11 +14,15 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 }
 $MsiPath = (Resolve-Path -LiteralPath $MsiPath).Path
 if ($UpgradeMsiPath) { $UpgradeMsiPath = (Resolve-Path -LiteralPath $UpgradeMsiPath).Path }
-$DSCPath = (Resolve-Path -LiteralPath $DSCPath).Path
-if ([IO.Path]::GetFileName($DSCPath) -ine 'dsc.exe' -or -not $DSCPath.Contains(' ')) {
-    throw 'Supply the real DSC archive extracted machine-wide at a path containing spaces.'
+# Check only the machine PATH, excluding interactive-user executable aliases.
+# The runner must provision this PATH for LocalSystem before invoking the test.
+$originalPath = $env:PATH
+try {
+    $env:PATH = [Environment]::GetEnvironmentVariable('PATH', 'Machine')
+    $dscExecutable = (Get-Command dsc.exe -CommandType Application -ErrorAction Stop).Source
 }
-$dscVersionOutput = & $DSCPath --version
+finally { $env:PATH = $originalPath }
+$dscVersionOutput = & $dscExecutable --version
 if ($LASTEXITCODE -ne 0) { throw 'The supplied DSC executable does not run.' }
 $match = [regex]::Match(($dscVersionOutput -join ' '), '\b(\d+\.\d+\.\d+)\b')
 if (-not $match.Success -or [version]$match.Groups[1].Value -lt [version]'3.3.0') {
@@ -49,7 +52,7 @@ function Assert([bool] $Condition, [string] $Message) {
 }
 function Invoke-Msi([string[]] $Arguments, [string] $LogName, [int] $Expected = 0) {
     $log = Join-Path $logDirectory "$LogName.log"
-    $process = Start-Process msiexec.exe -ArgumentList ($Arguments + @('/qn', '/norestart', '/l*v', "`"$log`"")) -PassThru
+    $process = Start-Process msiexec.exe -ArgumentList ($Arguments + @('/qn', '/norestart', '/l*v', "`"$log`"")) -WindowStyle Hidden -PassThru
     try {
         if (-not $process.WaitForExit(120000)) {
             $process.Kill()
@@ -81,9 +84,9 @@ function Assert-Installed {
     finally { $service.Dispose() }
     $registration = Get-CimInstance Win32_Service -Filter "Name='dscd'"
     Assert ($registration.StartName -eq 'LocalSystem' -and $registration.StartMode -eq 'Auto') 'LocalSystem automatic startup'
-    Assert ($registration.PathName.StartsWith('"' + $binary + '"') -and
-        $registration.PathName.Contains('-dsc-path "' + $DSCPath + '"')) 'quoted absolute service paths'
-    Assert ((Get-ItemProperty $settingsKey).DSC_PATH -ceq $DSCPath) 'persisted custom DSC_PATH'
+    $expectedCommand = '"{0}" -config-dir "{1}\." -results-dir "{2}\."' -f $binary, $config, $results
+    Assert ($registration.PathName -ceq $expectedCommand) 'quoted service paths with default DSC lookup'
+    Assert (-not (Test-Path $settingsKey)) 'no persisted DSC path'
     foreach ($directory in @($data, $config, $results)) {
         Assert (Test-Path -LiteralPath $directory -PathType Container) "directory $directory"
         Assert-ACL $directory
@@ -110,27 +113,21 @@ function Assert-Uninstalled {
     Assert ((Get-Content -Raw -LiteralPath (Join-Path $config 'retained.txt')) -ceq 'configuration marker') 'configuration data preserved'
     Assert ((Get-Content -Raw -LiteralPath (Join-Path $results 'retained.txt')) -ceq 'result marker') 'result data preserved'
     foreach ($directory in @($data, $config, $results)) { Assert-ACL $directory }
-    Assert (Test-Path -LiteralPath $DSCPath) 'DSC left installed'
+    Assert (Test-Path -LiteralPath $dscExecutable) 'DSC left installed'
 }
 
 try {
-    # Missing files, directories, relative paths, and embedded quotes are rejected.
-    Invoke-Msi @('/i', "`"$MsiPath`"", "DSC_PATH=`"$logDirectory\missing\dsc.exe`"") 'missing-prerequisite' 1603
-    Invoke-Msi @('/i', "`"$MsiPath`"", 'DSC_PATH=dsc.exe') 'relative-prerequisite' 1603
-    $directoryAsExecutable = Join-Path $logDirectory 'dsc.exe'
-    New-Item -ItemType Directory -Path $directoryAsExecutable | Out-Null
-    Invoke-Msi @('/i', "`"$MsiPath`"", "DSC_PATH=`"$directoryAsExecutable`"") 'directory-prerequisite' 1603
-    $quotedPath = $DSCPath.Insert($DSCPath.LastIndexOf('\'), '\bad"\..')
-    # Windows Installer escapes embedded quotes by doubling them, not with \.
-    $quotedProperty = 'DSC_PATH="' + $quotedPath.Replace('"', '""') + '"'
-    Invoke-Msi @('/i', "`"$MsiPath`"", $quotedProperty) 'quoted-prerequisite' 1603
-    Assert (-not (Get-Service dscd -ErrorAction SilentlyContinue)) 'prerequisite failure has no service side effects'
-    Invoke-Msi @('/i', "`"$MsiPath`"", "DSC_PATH=`"$DSCPath`"") 'install'
+    # Missing DSC fails at service startup, without installer discovery actions.
+    # Hide the fixture on this disposable machine and always restore it.
+    $hiddenExecutable = "$dscExecutable.unavailable"
+    Move-Item -LiteralPath $dscExecutable -Destination $hiddenExecutable
+    try {
+        Invoke-Msi @('/i', "`"$MsiPath`"") 'missing-dsc-startup' 1603
+        Assert (-not (Get-Service dscd -ErrorAction SilentlyContinue)) 'failed service startup rolls back registration'
+    }
+    finally { Move-Item -LiteralPath $hiddenExecutable -Destination $dscExecutable }
+    Invoke-Msi @('/i', "`"$MsiPath`"") 'install'
     $installedMsi = $MsiPath
-    Assert-Installed
-    # An explicit selection takes precedence over the saved path, even on repair.
-    $DSCPath = (Split-Path $DSCPath) + '\.\dsc.exe'
-    Invoke-Msi @('/i', "`"$MsiPath`"", 'REINSTALL=ALL', 'REINSTALLMODE=amus', "DSC_PATH=`"$DSCPath`"") 'explicit-override'
     Assert-Installed
     $service = Get-Service dscd
     try {
@@ -174,8 +171,6 @@ try {
         }
         [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($productInspector)
         Assert ($versions[1] -gt $versions[0] -and $codes[1] -ne $codes[0]) 'upgrade requires higher version and new ProductCode'
-        Invoke-Msi @('/i', "`"$UpgradeMsiPath`"", "DSC_PATH=`"$logDirectory\missing\dsc.exe`"") 'invalid-upgrade-override' 1603
-        Assert-Installed
         # PE overlay bytes are ignored by Windows. A unique old-payload marker
         # proves replacement even when both test MSIs were built from one binary.
         Stop-Service dscd
@@ -186,7 +181,7 @@ try {
         $oldFingerprint = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash
         Start-Service dscd
         Assert-Installed
-        # No DSC_PATH on upgrade: the package must restore the persisted selection.
+        # Upgrades continue using the service's machine PATH.
         Invoke-Msi @('/i', "`"$UpgradeMsiPath`"") 'upgrade'
         $installedMsi = $UpgradeMsiPath
         $currentMsi = $UpgradeMsiPath
@@ -196,7 +191,7 @@ try {
         Assert ((Get-Content -Raw -LiteralPath (Join-Path $results 'retained.txt')) -ceq 'result marker') 'result data survives upgrade'
         Invoke-Msi @('/i', "`"$MsiPath`"") 'downgrade-rejected' 1603
         Assert-Installed
-        Write-Output 'MSI upgrade, saved explicit DSC_PATH, data preservation, and downgrade rejection passed.'
+        Write-Output 'MSI upgrade, PATH-based DSC lookup, data preservation, and downgrade rejection passed.'
     }
     else {
         Write-Output 'Upgrade tests skipped: supply -UpgradeMsiPath to enable them.'
@@ -209,7 +204,7 @@ try {
     Invoke-Msi @('/x', "`"$currentMsi`"") 'uninstall'
     $installedMsi = $null
     Assert-Uninstalled
-    Invoke-Msi @('/i', "`"$currentMsi`"", "DSC_PATH=`"$DSCPath`"") 'reinstall'
+    Invoke-Msi @('/i', "`"$currentMsi`"") 'reinstall'
     $installedMsi = $currentMsi
     Assert-Installed
     Invoke-Msi @('/x', "`"$currentMsi`"") 'final-uninstall'

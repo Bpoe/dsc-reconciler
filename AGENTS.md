@@ -223,10 +223,18 @@ core packages.
 Windows release packaging uses the native x64 WiX project under
 `packaging/windows/msi`. Keep WiX pinned, the UpgradeCode stable, and the
 documented release-tag-to-MSI version mapping ordered and collision-free.
-The MSI accepts a prebuilt executable, uses `DSC_PATH` for machine-wide DSC,
-and owns service/Event Log registration declaratively; never invoke the manual
+The MSI accepts a prebuilt executable and relies on Microsoft DSC 3.3.0+ installed
+separately, with `dsc.exe` on the machine/system PATH visible to LocalSystem before
+service startup. User PATH and per-user executable aliases are insufficient;
+system PATH changes may require a reboot before services see them. Do not add
+DSC executable properties, discovery, validation, persistence or PATH modification
+to the MSI. The service uses the daemon's default `dsc` executable name.
+The MSI owns service/Event Log registration declaratively; never invoke the manual
 PowerShell installers from an MSI. Protect both ProgramData directories for
 SYSTEM and Administrators and preserve them and user data on uninstall.
+Build with the pinned WiX .NET SDK; no native helper, Visual C++ toolchain or
+Windows SDK build dependency is needed. Keep `build.ps1` focused on version
+mapping and `dotnet build`; run `inspect.ps1` separately in every packaging workflow.
 Build/inspect MSI tables in native Windows CI and release jobs; installation
 tests belong only in the manual service-integration workflow on disposable
 runners. No DSC bundling, per-user PATH discovery, migration logic or ARM64

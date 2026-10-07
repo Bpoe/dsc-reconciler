@@ -3,7 +3,7 @@
     <InstallerPlatform>x64</InstallerPlatform>
     <OutputType>Package</OutputType>
     <OutputName>dscd-$(ReleaseVersion)-windows-amd64</OutputName>
-    <DefineConstants>ReleaseVersion=$(ReleaseVersion);ProductVersion=$(ProductVersion);BinaryPath=$(BinaryPath);SearchHelperPath=$(SearchHelperPath)</DefineConstants>
+    <DefineConstants>ReleaseVersion=$(ReleaseVersion);ProductVersion=$(ProductVersion);BinaryPath=$(BinaryPath)</DefineConstants>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <!-- 1103: Go's unversioned PE intentionally gets a release file version to
          force replacement; the smoke test proves the old payload is replaced.

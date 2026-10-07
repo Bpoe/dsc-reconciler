@@ -45,12 +45,17 @@ try {
     Assert ($properties.UpgradeCode -eq '{536AF323-17B1-40ED-870C-751F063452AA}') 'stable UpgradeCode'
     Assert ($properties.ALLUSERS -eq '1') 'per-machine installation'
     Assert ($properties.ARPCOMMENTS -eq "dscd $Version") 'human-readable release version'
-    Assert ($properties.SecureCustomProperties.Split(';') -contains 'DSC_PATH') 'secure public DSC_PATH'
+    $tables = @(Rows 'SELECT `Name` FROM `_Tables`' @('Name'))
+    foreach ($table in @('AppSearch', 'DrLocator', 'RegLocator', 'Signature', 'Environment')) {
+        Assert ($table -notin $tables.Name) "no prerequisite discovery or PATH modification ($table)"
+    }
+    foreach ($name in @($properties.Keys) + ($properties.SecureCustomProperties -split ';')) {
+        Assert ($name -notmatch '(?i)dsc') "no DSC path property ($name)"
+    }
     foreach ($row in (Rows 'SELECT `Condition` FROM `LaunchCondition`' @('Condition'))) {
         Assert ($row.Condition.Length -le 255) 'launch conditions fit the MSI column limit'
+        Assert ($row.Condition -notmatch '(?i)dsc') 'no DSC prerequisite launch condition'
     }
-    $searchPaths = @(Rows 'SELECT `Path` FROM `DrLocator`' @('Path'))
-    Assert (@($searchPaths | Where-Object Path -ceq '[DSC_SEARCH_DIR]').Count -eq 1) 'native explicit DSC directory search uses a formatted property'
     $files = @(Rows 'SELECT `File`, `Component_`, `FileName`, `Version`, `Language` FROM `File`' @('Id', 'Component', 'Name', 'Version', 'Language'))
     Assert ($files.Count -eq 2) 'only dscd.exe and LICENSE must be packaged'
     $executable = @($files | Where-Object Id -eq 'DaemonFile')
@@ -88,7 +93,7 @@ try {
         $service[0].DisplayName -eq 'DSC Reconciliation Daemon' -and
         [int]$service[0].Type -eq 16 -and [int]$service[0].Start -eq 2 -and
         $service[0].Account -eq 'LocalSystem') 'automatic LocalSystem service'
-    Assert ($service[0].Arguments -ceq '-config-dir "[CONFIGFOLDER]." -results-dir "[RESULTSFOLDER]." -dsc-path "[DSC_PATH]"') 'service arguments'
+    Assert ($service[0].Arguments -ceq '-config-dir "[CONFIGFOLDER]." -results-dir "[RESULTSFOLDER]."') 'service uses default DSC executable from PATH'
     $control = @(Rows 'SELECT `Name`, `Event`, `Wait` FROM `ServiceControl`' @('Name', 'Event', 'Wait'))
     Assert ($control.Count -eq 1 -and $control[0].Name -eq 'dscd' -and
         [int]$control[0].Event -eq 171 -and [int]$control[0].Wait -eq 1) 'native start, stop, uninstall'
@@ -122,22 +127,11 @@ try {
         $value = @($registry | Where-Object { $_.Root -eq '2' -and $_.Key -eq $eventKey -and $_.Name -eq $entry[0] })
         Assert ($value.Count -eq 1 -and $value[0].Value -ceq $entry[1]) "Event Log $($entry[0])"
     }
-    Assert (@($registry | Where-Object { $_.Root -eq '2' -and $_.Key -eq 'Software\dsc-reconciler\dscd' -and $_.Name -eq 'DSC_PATH' -and $_.Value -eq '[DSC_PATH]' }).Count -eq 1) 'persisted DSC path'
+    Assert (@($registry | Where-Object { $_.Key -ne $eventKey }).Count -eq 0) 'only Event Log registry entries; no DSC path persistence'
+    Assert ('Settings' -notin $components.Id) 'no DSC settings component'
     $actions = @(Rows 'SELECT `Action`, `Type`, `Target` FROM `CustomAction`' @('Name', 'Type', 'Target'))
-    $searchInitializer = @($actions | Where-Object Name -eq 'PrepareDSCSearchDirectory')
-    Assert ($searchInitializer.Count -eq 1 -and ([int]$searchInitializer[0].Type -band 63) -eq 1 -and
-        $searchInitializer[0].Target -ceq 'PrepareDSCSearchDirectory') 'native canonical search-directory property initialization'
-    $searchInitialization = [int]($sequence | Where-Object Action -eq 'PrepareDSCSearchDirectory').Sequence
-    $appSearch = [int]($sequence | Where-Object Action -eq 'AppSearch').Sequence
-    Assert ($searchInitialization -gt 0 -and $searchInitialization -lt $appSearch) 'DSC parent directory initialized before AppSearch'
-    $savedCheck = @($actions | Where-Object Name -eq 'CheckSavedDSCPath')
-    Assert ($savedCheck.Count -eq 1 -and ([int]$savedCheck[0].Type -band 63) -eq 1 -and
-        $savedCheck[0].Target -ceq 'CheckSavedDSCPath') 'saved executable existence check'
-    $savedCheckSequence = [int]($sequence | Where-Object Action -eq 'CheckSavedDSCPath').Sequence
-    $restoreSequence = [int]($sequence | Where-Object Action -eq 'RestoreDSCPath').Sequence
-    Assert ($savedCheckSequence -gt $appSearch -and $savedCheckSequence -lt $restoreSequence) 'saved executable checked before restoring DSC_PATH'
     foreach ($action in $actions) {
-        Assert (([int]$action.Type -band 63) -eq 51 -or $action.Target -in @('PrepareDSCSearchDirectory', 'CheckSavedDSCPath', 'SchedServiceConfig', 'ExecServiceConfig', 'RollbackServiceConfig')) "unexpected custom action $($action.Name)"
+        Assert ($action.Target -in @('SchedServiceConfig', 'ExecServiceConfig', 'RollbackServiceConfig')) "unexpected custom action $($action.Name)"
     }
     Write-Output "MSI metadata, contents, service, recovery, Event Log, and ACL inspection passed: $MsiPath"
 }
