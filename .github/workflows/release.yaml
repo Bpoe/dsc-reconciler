@@ -18,7 +18,6 @@ concurrency:
 
 env:
   VERSION: ${{ inputs.version }}
-  WIX_VERSION: '7.0.0'
 
 jobs:
   build:
@@ -93,7 +92,7 @@ jobs:
           .\packaging\windows\msi\test-version.ps1
           $msiOutput = Join-Path $env:RUNNER_TEMP 'msi-output'
           .\packaging\windows\msi\build.ps1 -Version $env:VERSION -BinaryPath $executable `
-              -OutputDirectory $msiOutput -WixVersion $env:WIX_VERSION -AcceptWixEula
+              -OutputDirectory $msiOutput
           .\packaging\windows\msi\inspect.ps1 -MsiPath (Join-Path $msiOutput "$name.msi") -Version $env:VERSION
           Copy-Item (Join-Path $msiOutput "$name.msi") -Destination $dist
       - name: Build and package Linux

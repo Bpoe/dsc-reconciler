@@ -280,7 +280,9 @@ Do not build elaborate repair logic beyond normal Windows Installer capabilities
 
 Use a current supported stable version of WiX Toolset.
 
-Pin the WiX version in the build workflow.
+Pin the WiX SDK and Util extension versions only in dscd.wixproj.
+Record EULA acceptance there with `<AcceptEula>wix7</AcceptEula>` and rely on
+WiX's built-in enforcement rather than custom script switches or guards.
 
 Place installer source files under:
 
