@@ -33,7 +33,7 @@ try {
 finally { $reader.Dispose() }
 $output = [IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Path $output -Force | Out-Null
-dotnet build "$PSScriptRoot/dscd.wixproj" --configuration Release --nologo `
+dotnet build "$PSScriptRoot/dscd.wixproj" --configuration Release --nologo --no-incremental `
     "-p:ReleaseVersion=$Version" "-p:ProductVersion=$productVersion" "-p:BinaryPath=$binary" `
     "-p:OutputPath=$output/" "-p:AcceptEula=wix7"
 if ($LASTEXITCODE -ne 0) { throw "WiX build failed: $LASTEXITCODE" }
