@@ -130,7 +130,7 @@ try {
     Assert-Installed
     # An explicit selection takes precedence over the saved path, even on repair.
     $DSCPath = (Split-Path $DSCPath) + '\.\dsc.exe'
-    Invoke-Msi @('/famus', "`"$MsiPath`"", "DSC_PATH=`"$DSCPath`"") 'explicit-override'
+    Invoke-Msi @('/i', "`"$MsiPath`"", 'REINSTALL=ALL', 'REINSTALLMODE=amus', "DSC_PATH=`"$DSCPath`"") 'explicit-override'
     Assert-Installed
     $service = Get-Service dscd
     try {
