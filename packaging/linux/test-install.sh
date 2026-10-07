@@ -28,7 +28,7 @@ install_package() {
 remove_package() {
     case "$initial" in
         *.deb) apt-get remove --yes dscd ;;
-        *.rpm) dnf remove --assumeyes --setopt=clean_requirements_on_remove=False dscd ;;
+        *.rpm) dnf remove --assumeyes --noautoremove dscd ;;
     esac
 }
 assert_running() {
@@ -107,12 +107,22 @@ if "$systemd_running" && systemctl is-active --quiet dscd.service; then exit 1; 
 assert_preserved
 remove_package
 assert_removed
+if "$systemd_running"; then
+    install_package "$initial"
+    assert_running
+    systemctl disable --now dscd.service
+    install_package "$newer"
+    if systemctl is-active --quiet dscd.service || systemctl is-enabled --quiet dscd.service; then exit 1; fi
+    assert_preserved
+    remove_package
+    assert_removed
+fi
 if [[ $initial == *.deb ]]; then
     apt-get purge --yes dscd
     assert_removed
 fi
 if "$systemd_running"; then
-    echo "Install, restart, running/stopped upgrades, reinstall, removal and data preservation passed."
+    echo "Install, restart, running/stopped/disabled upgrades, reinstall, removal and data preservation passed."
 else
     echo "No-systemd installation, upgrade, reinstall, removal and data preservation passed; service startup NOT tested."
 fi

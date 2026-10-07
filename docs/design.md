@@ -562,11 +562,14 @@ An opt-in Windows test against DSC `3.3.0` verified MCP initialization,
 EOF shutdown, Echo defaults and inline parameter overrides for all six
 configuration/parameter-format combinations in one shared server session.
 This is not native Linux hardware, general DSC resource or power-loss validation.
-Actual service installation, host-shutdown delivery and other DSC/resource compatibility must
-still be verified in a disposable deployment environment; CI definitions are
-not evidence of an already completed CI run.
 Native DEB/RPM build and artifact inspection passed locally, including ownership,
 permissions, unit verification and prerelease ordering. Disposable Ubuntu/Fedora
 containers with DSC 3.3.0 exercised package lifecycle and data preservation
 without running systemd, including DEB purge. This does not establish service
 startup or real DSC resource execution.
+The DEB lifecycle additionally passed on a disposable Ubuntu systemd host,
+including enable/start, stop/start, running/stopped/disabled upgrades, reinstall,
+remove/reinstall, removal/purge and data/permission preservation. Native RPM
+systemd startup, Windows service registration, host-shutdown delivery and other
+DSC/resource compatibility still need disposable deployment validation.
+CI definitions are not evidence of an already completed CI run.
