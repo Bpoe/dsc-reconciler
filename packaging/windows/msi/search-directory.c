@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <msi.h>
+#include <msiquery.h>
 #include <wchar.h>
 
 /* DrLocator rejects ".." segments. Derive a canonical parent directory before
