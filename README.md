@@ -435,9 +435,12 @@ and the in-memory SCM lifecycle are covered.
 Actual service registration and system shutdown were **not** exercised on this
 shared machine. The manual service-integration workflow provides disposable
 systemd/SCM smoke checks; its presence does not establish a completed run.
-Native Windows MSI compilation and table inspection have passed on a disposable
-runner. Installation smoke tests must also pass before claiming runtime validation;
-compilation and inspection alone do not validate service registration or package lifecycle.
+Native Windows MSI builds, table inspection and the full installation lifecycle
+passed on a disposable runner in [service-integration run 37578288245](https://github.com/Bpoe/dsc-reconciler/actions/runs/37578288245).
+This covered prerequisites, service/ACL/Event Log/recovery checks, explicit DSC
+path overrides, upgrade and payload replacement, downgrade rejection, repair,
+reinstall, uninstall and data retention. Host-shutdown delivery and the complete
+draft-release workflow remain unverified.
 The opt-in Echo server test on Windows with DSC `3.3.0` passed for YAML/JSON
 configurations with no sidecar and with either inline parameter format in one
 initialized session. Other resources,

@@ -583,6 +583,12 @@ empty input directory, verifies SCM, ACLs and Event Log behavior, cycles the
 service and uninstalls while checking data retention. MSI logs are retained as
 workflow artifacts. Defining those checks is not evidence they have run;
 actual install/upgrade/shutdown behavior must be reported separately.
+The full native MSI build, inspection and lifecycle checks passed in
+[service-integration run 37578288245](https://github.com/Bpoe/dsc-reconciler/actions/runs/37578288245),
+including persisted DSC settings, executable replacement on upgrade, repair,
+reinstall, uninstall and data retention. The same run passed Linux systemd
+integration. Host-shutdown delivery and full draft-release execution were not
+tested by that workflow.
 
 The execution timeout defaults to 15 minutes and covers one configuration request,
 including a blocked stdin write or waiting for its response. A timed-out request
