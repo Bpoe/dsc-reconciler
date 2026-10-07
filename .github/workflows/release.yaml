@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release candidate tag (vX.Y.Z-rc.N)
+        description: Release tag (vX.Y.Z-rc.N or vX.Y.Z)
         required: true
         default: v0.0.1-rc.1
         type: string
@@ -36,8 +36,13 @@ jobs:
     steps:
       - name: Validate version
         run: |
-          if ($env:VERSION -cnotmatch '\Av(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-rc\.[1-9][0-9]*\z') {
-            throw 'Version must be a release candidate such as v0.0.1-rc.1.'
+          if ($env:VERSION -cnotmatch '\Av(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?\z') {
+            throw 'Version must be vX.Y.Z-rc.N or vX.Y.Z.'
+          }
+          if ([bigint]$Matches[1] -gt 255 -or [bigint]$Matches[2] -gt 255 -or
+              [bigint]$Matches[3] -gt 654 -or
+              ($Matches[4] -and [bigint]$Matches[4].Substring(4) -gt 98)) {
+            throw 'MSI versions require major/minor <= 255, patch <= 654, and RC 1..98.'
           }
       - uses: actions/checkout@v4
         with:
@@ -50,6 +55,8 @@ jobs:
       - name: Check source
         run: |
           go mod verify
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build ./...
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go test ./...
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -80,6 +87,10 @@ jobs:
           Copy-Item (Join-Path 'docs' 'design.md') -Destination $docs
           Copy-Item (Join-Path 'packaging' 'windows') -Destination $packaging -Recurse
           Compress-Archive -Path $package -DestinationPath (Join-Path $dist "$name.zip")
+          .\packaging\windows\msi\test-version.ps1
+          .\packaging\windows\msi\build.ps1 -Version $env:VERSION -BinaryPath $executable `
+              -OutputPath (Join-Path $dist "$name.msi")
+          .\packaging\windows\msi\inspect.ps1 -Path (Join-Path $dist "$name.msi") -Version $env:VERSION
       - name: Build and package Linux
         if: runner.os == 'Linux'
         shell: bash
@@ -118,10 +129,10 @@ jobs:
           pattern: dscd-*-amd64
           merge-multiple: true
           path: dist
-      - name: Checksum archives
+      - name: Checksum release artifacts
         working-directory: dist
         run: |
-          sha256sum "dscd-$VERSION-linux-amd64.tar.gz" "dscd-$VERSION-windows-amd64.zip" > SHA256SUMS
+          sha256sum dscd-* > SHA256SUMS
           sha256sum --check SHA256SUMS
       - name: Create tag and draft pre-release
         env:
@@ -138,7 +149,8 @@ jobs:
           gh release create "$VERSION" \
             "dist/dscd-$VERSION-linux-amd64.tar.gz" \
             "dist/dscd-$VERSION-windows-amd64.zip" \
+            "dist/dscd-$VERSION-windows-amd64.msi" \
             dist/SHA256SUMS \
             --verify-tag --draft --prerelease \
             --title "dscd $VERSION" --generate-notes \
-            --notes "Release candidate built from $GITHUB_SHA. Linux and Windows amd64 binaries include service assets and the MIT license. Install DSC and resources separately. This workflow does not run real DSC or service-installation tests."
+            --notes "Built from $GITHUB_SHA. Linux and Windows amd64 binaries include service assets and the MIT license; Windows also includes a native MSI. Install DSC and resources separately. MSI tables are inspected during build; installation tests run separately in the manual service-integration workflow."

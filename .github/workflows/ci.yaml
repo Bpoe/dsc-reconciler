@@ -47,3 +47,13 @@ jobs:
           if ($unformatted.Count -ne 0) { $unformatted; throw 'Run gofmt on the files above.' }
       - name: Race
         run: go test -race ./...
+      - name: Build and inspect Windows MSI (no installation)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          go build -o "$env:RUNNER_TEMP\dscd.exe" ./cmd/dscd
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\packaging\windows\msi\test-version.ps1
+          .\packaging\windows\msi\build.ps1 -Version v0.0.1-rc.1 `
+              -BinaryPath "$env:RUNNER_TEMP\dscd.exe" -OutputPath "$env:RUNNER_TEMP\dscd.msi"
+          .\packaging\windows\msi\inspect.ps1 -Path "$env:RUNNER_TEMP\dscd.msi" -Version v0.0.1-rc.1

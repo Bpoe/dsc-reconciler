@@ -472,8 +472,8 @@ it to a least-privileged identity when the selected resources permit. Do not dae
 or invoke `sudo` from the daemon. Keep systemd details outside core packages.
 
 The service manager handles restarts and final process cleanup. Provision one
-instance for each directory pair. Windows installation/removal scripts are under
-`packaging/windows`, default to LocalSystem, quote all executable/path arguments,
+instance for each directory pair. The Windows MSI is under
+`packaging/windows/msi`, runs as LocalSystem, quotes all executable/path arguments,
 and register the `dscd` Application Event Log source. Foreground logs are JSON on
 stderr; SCM sends JSON messages to that source (Event ID 1, informational transport;
 the JSON `level` records error severity). Logs are not stored in result files.
@@ -483,9 +483,81 @@ Release candidates are built from a single selected revision by the manually
 triggered `release.yaml` workflow. Native Linux and Windows amd64 jobs test,
 build and package the daemon with platform service assets and the MIT license.
 Only after both jobs succeed does the workflow tag that revision and create a
-draft pre-release with both archives and SHA-256 checksums. Publishing remains
+draft pre-release with both archives, the Windows MSI and SHA-256 checksums
+covering every release artifact. Publishing remains
 an explicit review step; release tags are not reused. DSC and its resources are
 separate prerequisites, not bundled release dependencies.
+
+### Windows MSI
+
+The recommended Windows x64 installation is a per-machine WiX MSI, not a
+PowerShell service installer. It uses Windows Installer's standard directory
+properties: `[ProgramFiles64Folder]dscd\dscd.exe`,
+`[CommonAppDataFolder]dsc\config.d`, and
+`[CommonAppDataFolder]dsc\results.d`. The executable inherits Program Files'
+administrator-controlled permissions. Both data directories have protected
+inheritable DACLs permitting only SYSTEM and Administrators full access; no
+recursive permission changes to unrelated content are performed.
+The directories remain after uninstall, including when empty.
+
+Install Microsoft DSC 3.3.0 or later separately. Microsoft's
+[Windows installation documentation](https://learn.microsoft.com/en-us/powershell/dsc/install?view=dsc-3.0)
+and [3.3.0 release assets](https://github.com/PowerShell/DSC/releases/tag/v3.3.0)
+provide ZIP distributions as well as other installation methods. The MSI's
+default discovery location, `[ProgramFiles64Folder]DSC\dsc.exe`, is an
+administrator-chosen archive extraction convention, not an assumed WinGet or
+Store path. A public secure MSI property `DSC_PATH` accepts an explicit absolute
+executable path, including spaces. The MSI verifies existence, not the DSC
+version or resource compatibility. Operators must verify version and provision
+LocalSystem access to DSC/resources, with no untrusted write access.
+Interactive user PATH and per-user executable aliases are never consulted.
+The installer neither bundles nor downloads DSC.
+
+Native service tables own `dscd`, display name `DSC Reconciliation Daemon`,
+automatic startup and LocalSystem identity. The command line supplies only
+`-config-dir`, `-results-dir` and absolute `-dsc-path`; the daemon's five-minute
+interval and fifteen-minute execution timeout remain authoritative.
+Reconciliation starts immediately, then waits five minutes after each completed
+pass. Deploying trusted configurations does not require a service restart.
+Service recovery restarts after five seconds and resets its failure count after
+one day. Event Log registration is package-owned under HKLM, uses the existing
+Application source `dscd` and preserves Event ID 1 / JSON logging.
+
+Major upgrades use a stable UpgradeCode and a new ProductCode per package
+version, stop the service before replacement and restart it afterward.
+The selected DSC path is persisted machine-wide and retained on upgrade unless
+explicitly overridden. Installation is transactional where Windows Installer
+supports rollback. No migration or alternate legacy layouts are supported.
+Uninstall stops and removes the service, executable and Event Log registration,
+but leaves data directories, documents, results, DSC and reconciled machine
+state intact. Ordinary MSI repair restores package-owned resources and never
+ships or replaces configuration documents.
+
+Release tags map deterministically to MSI's three-field ProductVersion:
+`vM.m.p-rc.N` becomes `M.m.(100*p+N)`, and `vM.m.p` becomes
+`M.m.(100*p+99)`. Major and minor must be 0..255, patch 0..654, and candidate
+number 1..98. Unsupported suffixes, leading zeros and out-of-range fields fail
+the build rather than colliding. For example, `v0.0.1-rc.1` is `0.0.101`,
+`v0.0.1-rc.2` is `0.0.102`, and `v0.0.1` is `0.0.199`.
+This preserves ordering into the next patch/minor/major; publish intended
+upgrades in increasing release order. The full tag remains in artifact names
+and human-readable package metadata. Release workflows still create drafts
+marked pre-release, even when a stable-form tag is selected.
+
+WiX Toolset 7.0.0 is pinned for builds; no Go source compilation happens inside
+the installer project. The packaging build accepts a previously built executable.
+Build-time PowerShell scripts validate the version and inspect Windows Installer
+tables for x64 architecture, metadata, paths, payload, service settings,
+recovery, Event Log registration and directory ACLs. PowerShell, Go, .NET and WiX
+are not target-machine prerequisites. Review WiX's
+[maintenance fee terms](https://docs.firegiant.com/wix/osmf/) before building.
+Ordinary CI and release builds inspect the MSI but never install it.
+The manual `service-integration.yaml` workflow installs it on a disposable
+Windows runner with DSC 3.3.0 at a machine-wide path containing spaces and an
+empty input directory, verifies SCM, ACLs and Event Log behavior, cycles the
+service and uninstalls while checking data retention. MSI logs are retained as
+workflow artifacts. Defining those checks is not evidence they have run;
+actual install/upgrade/shutdown behavior must be reported separately.
 
 The execution timeout defaults to 15 minutes and covers one configuration request,
 including a blocked stdin write or waiting for its response. A timed-out request
