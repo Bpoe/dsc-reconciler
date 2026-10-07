@@ -49,6 +49,12 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Cache NuGet packages
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('packaging/windows/msi/dscd.wixproj') }}
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
