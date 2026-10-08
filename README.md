@@ -17,6 +17,69 @@ resource model. `dscd` parses only its own metadata; DSC owns testing and applyi
 configurations. See the
 [design and result contract](docs/design.md) and [contributor guidance](AGENTS.md).
 
+## Usage
+
+### Installation
+Download the `.deb`, `.rpm`, or `.msi` for your platform from
+[GitHub Releases](https://github.com/Bpoe/dsc-reconciler/releases).
+Use the filename for your chosen release in the examples below.
+The native packages register the service, start it, and enable it to run at boot.
+
+#### Linux
+Install Microsoft's `dsc` package first, then install the daemon package using
+the command for your distribution:
+
+```sh
+# Debian / Ubuntu
+sudo apt install ./dscd_0.0.2_amd64.deb
+
+# Fedora / RHEL-compatible systems
+sudo dnf install ./dscd-0.0.2.x86_64.rpm
+```
+
+#### Windows
+Before installing `dscd`, ensure `dsc.exe` is on the **machine/system PATH**
+visible to LocalSystem. A per-user executable alias or PATH change in your
+terminal is not sufficient; a reboot may be needed after changing the system PATH.
+
+Double-click the downloaded MSI and approve elevation. It installs and starts
+the **dscd** service (**DSC Reconciliation Daemon**). The MSI does not install DSC
+or change PATH.
+
+### Add configurations
+
+As an administrator, publish your DSC `.yaml` or `.json` documents directly in
+the input directory created by the installer:
+- **Linux:** `/etc/dsc/config.d`
+- **Windows:** `%ProgramData%\dsc\config.d`
+
+**Adding a configuration authorizes DSC to change the machine by default.**
+For audit-only operation, publish a matching metadata file first. For example,
+before adding `web.yaml`, create `web.dscd.json` in the same directory:
+
+```json
+{
+  "operation": "test"
+}
+```
+To enforce desired state instead, use `{"operation":"set"}` or omit the metadata.
+
+### Read results
+Each configuration has a latest-result file. For `web.yaml`, read:
+
+Linux:
+```sh
+sudo cat /var/lib/dsc/results.d/web.yaml.result.json
+```
+
+Windows, in an elevated PowerShell session:
+```powershell
+Get-Content "$env:ProgramData\dsc\results.d\web.yaml.result.json" -Raw |
+    ConvertFrom-Json | Format-List
+```
+
+# Development
+
 ## Prerequisites and compatibility
 
 - Go **1.27.x** to build; no Go installation is needed to run the compiled binary.
