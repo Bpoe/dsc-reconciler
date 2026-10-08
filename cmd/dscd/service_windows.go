@@ -22,7 +22,7 @@ func platformRun(args []string) error {
 		defer cancel()
 		logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 		return boundedRun(ctx, func() error {
-			return run(ctx, args, os.Stderr, logger, func() {})
+			return run(ctx, args, os.Stdout, os.Stderr, logger, func() {})
 		}, shutdownTimeout)
 	}
 	log, err := eventlog.Open("dscd")
@@ -36,7 +36,7 @@ func platformRun(args []string) error {
 		logger:  logger,
 		timeout: shutdownTimeout,
 		run: func(ctx context.Context, ready func()) error {
-			return run(ctx, args, output, logger, ready)
+			return run(ctx, args, output, output, logger, ready)
 		},
 	}
 	if err := svc.Run("dscd", handler); err != nil {

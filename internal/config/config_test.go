@@ -2,18 +2,20 @@ package config
 
 import (
 	"errors"
+	"flag"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
 
 func TestParse(t *testing.T) {
 	o, err := Parse(nil, io.Discard)
-	if err != nil || o.Interval != 5*time.Minute || o.ExecutionTimeout != 15*time.Minute || o.DSCPath != "dsc" {
+	if err != nil || o.Version || o.Interval != 5*time.Minute || o.ExecutionTimeout != 15*time.Minute || o.DSCPath != "dsc" {
 		t.Fatalf("defaults: %+v, %v", o, err)
 	}
 	input, output := defaultDirectories()
@@ -24,10 +26,35 @@ func TestParse(t *testing.T) {
 		{"-interval", "0"}, {"-interval", "-1s"}, {"-interval", "bad"},
 		{"-execution-timeout", "0"}, {"-config-dir", ""}, {"-results-dir", ""},
 		{"-dsc-path", ""}, {"unexpected"}, {"-unknown"},
+		{"--version=invalid"}, {"--version", "unexpected"}, {"--version", "--unknown"},
 	} {
 		if _, err := Parse(args, io.Discard); err == nil {
 			t.Errorf("accepted %v", args)
 		}
+	}
+}
+
+func TestParseVersion(t *testing.T) {
+	for _, test := range []struct {
+		arg  string
+		want bool
+	}{
+		{"--version", true}, {"-version", true},
+		{"--version=true", true}, {"--version=false", false},
+	} {
+		t.Run(test.arg, func(t *testing.T) {
+			o, err := Parse([]string{test.arg}, io.Discard)
+			if err != nil || o.Version != test.want {
+				t.Fatalf("version: %+v, %v", o, err)
+			}
+		})
+	}
+	var help strings.Builder
+	if _, err := Parse([]string{"--help"}, &help); !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("help: %v", err)
+	}
+	if !strings.Contains(help.String(), "-version") {
+		t.Fatalf("version missing from help: %s", help.String())
 	}
 }
 

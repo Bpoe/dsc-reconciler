@@ -13,7 +13,7 @@ output=$(realpath "$output")
 export STAGE_DIR="$output/.stage"
 mkdir -p "$STAGE_DIR"
 trap 'rm -rf "$STAGE_DIR"' EXIT
-TMPDIR="$STAGE_DIR" CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$STAGE_DIR/dscd" ./cmd/dscd
+TMPDIR="$STAGE_DIR" CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-X main.version=$VERSION" -o "$STAGE_DIR/dscd" ./cmd/dscd
 for format in deb rpm; do
     nfpm package --config packaging/linux/nfpm.yaml --packager "$format" --target "$output/"
 done

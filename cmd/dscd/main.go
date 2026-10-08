@@ -19,6 +19,9 @@ import (
 
 const shutdownTimeout = 30 * time.Second
 
+// Release builds set version with -ldflags "-X main.version=<release tag>".
+var version = "dev"
+
 func main() {
 	if err := platformRun(os.Args[1:]); err != nil && !errors.Is(err, flag.ErrHelp) {
 		slog.New(slog.NewJSONHandler(os.Stderr, nil)).Error("dscd stopped with error", "error", err)
@@ -26,10 +29,16 @@ func main() {
 	}
 }
 
-func run(ctx context.Context, args []string, output io.Writer, logger *slog.Logger, ready func()) error {
-	options, err := config.Parse(args, output)
+func run(ctx context.Context, args []string, stdout, stderr io.Writer, logger *slog.Logger, ready func()) error {
+	options, err := config.Parse(args, stderr)
 	if err != nil {
 		return err
+	}
+	if options.Version {
+		if _, err := fmt.Fprintf(stdout, "dscd %s\n", version); err != nil {
+			return fmt.Errorf("write version: %w", err)
+		}
+		return nil
 	}
 	if err = options.Prepare(); err != nil {
 		return err

@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -30,6 +31,53 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
+}
+
+func TestVersionCommand(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, arg := range []string{"--version", "-version"} {
+		t.Run(arg, func(t *testing.T) {
+			root := t.TempDir()
+			resultsDir := filepath.Join(root, "results")
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, executable, arg,
+				"-config-dir", filepath.Join(root, "missing-input"),
+				"-results-dir", resultsDir, "-dsc-path", filepath.Join(root, "missing-dsc"))
+			cmd.Env = append(os.Environ(), "DSCD_TEST_DAEMON=1")
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("version command: %v (%s)", err, stderr.String())
+			}
+			if stdout.String() != "dscd "+version+"\n" || stderr.Len() != 0 {
+				t.Fatalf("stdout=%q, stderr=%q", stdout.String(), stderr.String())
+			}
+			if _, err := os.Stat(resultsDir); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("version touched results directory: %v", err)
+			}
+		})
+	}
+}
+
+func TestVersionOutputFailure(t *testing.T) {
+	output, err := os.CreateTemp(t.TempDir(), "closed-output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := output.Close(); err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	err = run(context.Background(), []string{"--version"}, output, io.Discard, logger, func() {
+		t.Fatal("version started the daemon")
+	})
+	if !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("version output failure: %v", err)
+	}
 }
 
 func TestRealProcessPerPassAndRecovery(t *testing.T) {
@@ -250,7 +298,7 @@ func TestEndToEndPublicationAndContinuation(t *testing.T) {
 	go func() {
 		defer close(done)
 		runErr = run(ctx, []string{"-config-dir", input, "-results-dir", output, "-dsc-path", executable, "-interval", "1h"},
-			io.Discard, slog.New(slog.NewJSONHandler(io.Discard, nil)), func() {})
+			io.Discard, io.Discard, slog.New(slog.NewJSONHandler(io.Discard, nil)), func() {})
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -327,16 +375,20 @@ func TestStartupAndShutdown(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	ready := false
 	err = boundedRun(ctx, func() error {
-		return run(ctx, args, io.Discard, logger, func() { ready = true; cancel() })
+		return run(ctx, args, io.Discard, io.Discard, logger, func() { ready = true; cancel() })
 	}, time.Second)
 	if err != nil || !ready {
 		t.Fatalf("startup/shutdown: ready=%t, %v", ready, err)
 	}
-	if err := run(context.Background(), []string{"-interval", "0"}, io.Discard, logger, func() {}); err == nil {
+	if err := run(context.Background(), []string{"-interval", "0"}, io.Discard, io.Discard, logger, func() {}); err == nil {
 		t.Fatal("accepted invalid startup")
 	}
-	if err := run(context.Background(), []string{"-help"}, io.Discard, logger, func() {}); !errors.Is(err, flag.ErrHelp) {
+	var stdout, stderr bytes.Buffer
+	if err := run(context.Background(), []string{"-help"}, &stdout, &stderr, logger, func() {}); !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("help: %v", err)
+	}
+	if stdout.Len() != 0 || !strings.Contains(stderr.String(), "-version") {
+		t.Fatalf("help stdout=%q, stderr=%q", stdout.String(), stderr.String())
 	}
 }
 

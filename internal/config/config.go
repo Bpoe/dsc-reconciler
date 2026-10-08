@@ -15,6 +15,7 @@ import (
 
 // Options configures one daemon instance.
 type Options struct {
+	Version          bool
 	ConfigDir        string
 	ResultsDir       string
 	DSCPath          string
@@ -28,6 +29,7 @@ func Parse(args []string, output io.Writer) (Options, error) {
 	o := Options{}
 	f := flag.NewFlagSet("dscd", flag.ContinueOnError)
 	f.SetOutput(output)
+	f.BoolVar(&o.Version, "version", false, "print dscd version and exit")
 	f.StringVar(&o.ConfigDir, "config-dir", input, "directory of DSC documents")
 	f.StringVar(&o.ResultsDir, "results-dir", results, "directory for latest results")
 	f.StringVar(&o.DSCPath, "dsc-path", "dsc", "DSC executable name or path")
