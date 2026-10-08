@@ -9,24 +9,21 @@ import (
 	"github.com/Bpoe/dsc-reconciler/internal/dsc"
 )
 
-type metadata struct {
-	Operation json.RawMessage `json:"operation"`
-}
-
 func readMetadata(ctx context.Context, path string) (dsc.Operation, error) {
 	text, err := readInputFile(ctx, path, maxInputBytes)
 	if err != nil {
 		return "", fmt.Errorf("read metadata: %w", err)
 	}
-	var meta metadata
+	var meta map[string]json.RawMessage
 	if !strings.HasPrefix(strings.TrimSpace(text), "{") || json.Unmarshal([]byte(text), &meta) != nil {
 		return "", fmt.Errorf("metadata %q must be a valid JSON object", path)
 	}
-	if meta.Operation == nil {
+	rawOperation, ok := meta["operation"]
+	if !ok {
 		return dsc.OperationSet, nil
 	}
 	var operation dsc.Operation
-	if json.Unmarshal(meta.Operation, &operation) != nil ||
+	if json.Unmarshal(rawOperation, &operation) != nil ||
 		(operation != dsc.OperationSet && operation != dsc.OperationTest) {
 		return "", fmt.Errorf("metadata %q operation must be \"set\" or \"test\"", path)
 	}

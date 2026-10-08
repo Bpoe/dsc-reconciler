@@ -90,6 +90,13 @@ func TestMetadataDefaultsAndHashIdentity(t *testing.T) {
 		{"formatted test", "{\n  \"operation\": \"test\"\n}\n", dsc.OperationTest},
 		{"unknown property", `{"operation":"test","future":{"secret":"PRIVATE-METADATA"}}`, dsc.OperationTest},
 		{"only unknown property", `{"future":"PRIVATE-METADATA"}`, dsc.OperationSet},
+		{"capitalized property", `{"Operation":"test"}`, dsc.OperationSet},
+		{"uppercase property", `{"OPERATION":"test"}`, dsc.OperationSet},
+		{"invalid capitalized property", `{"Operation":null}`, dsc.OperationSet},
+		{"exact set before capitalized test", `{"operation":"set","Operation":"test"}`, dsc.OperationSet},
+		{"exact set after capitalized test", `{"Operation":"test","operation":"set"}`, dsc.OperationSet},
+		{"exact test before uppercase set", `{"operation":"test","OPERATION":"set"}`, dsc.OperationTest},
+		{"exact test after uppercase set", `{"OPERATION":"set","operation":"test"}`, dsc.OperationTest},
 		{"removed", "", dsc.OperationSet},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -158,6 +165,7 @@ func TestInvalidMetadataFailsOnlyConfiguration(t *testing.T) {
 		`{"operation":"apply"}`, `{"operation":"PRIVATE-METADATA"}`, `{"operation":""}`,
 		`{"operation":null}`, `{"operation":false}`, `{"operation":1}`, `{"operation":[]}`,
 		`{"operation":{}}`, `{"operation":"Test"}`, `{"operation":" test "}`, "{\"x\":\"\xff\"}",
+		`{"operation":null,"Operation":"test"}`, `{"OPERATION":"test","operation":null}`,
 	} {
 		t.Run(content, func(t *testing.T) {
 			dir := t.TempDir()
