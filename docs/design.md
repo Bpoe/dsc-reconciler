@@ -72,6 +72,7 @@ The initial configuration uses the standard `flag` package:
 
 | Flag | Go field | Default | Meaning |
 | --- | --- | --- | --- |
+| `--version` | `Version` | `false` | Print `dscd <version>` to stdout and exit without daemon startup. |
 | `-config-dir` | `ConfigDir` | Linux: `/etc/dsc/config.d`; Windows: `%ProgramData%\dsc\config.d` | Directory containing DSC documents. |
 | `-results-dir` | `ResultsDir` | Linux: `/var/lib/dsc/results.d`; Windows: `%ProgramData%\dsc\results.d` | Directory containing latest execution results. |
 | `-interval` | `Interval` | `5m` | Delay after each completed reconciliation pass; must be positive. |
@@ -88,7 +89,18 @@ tree in v1. Windows uses the OS `ProgramData` location (falling back to
 its own documented environment and resource lookup. Under SCM, the executable
 automatically detects service operation; no service-mode flag is needed.
 
-At startup, validate flags, resolve paths, verify the input directory exists and
+`--version` (also `-version`, following standard Go flag syntax) writes one
+newline-terminated line and exits successfully. Flags are still parsed and
+validated, but version requests do not prepare paths, require DSC, create results,
+or start reconciliation. Help and parse diagnostics remain on stderr.
+Output-write failures return a nonzero exit.
+Unstamped builds report `dscd dev`. Release builds set `main.version` using
+`go build -ldflags "-X main.version=<release tag>"`, preserving the complete
+`vX.Y.Z` or `vX.Y.Z-rc.N` tag in archives and native packages, independently of
+package-manager version mappings. The release MSI uses the prebuilt, stamped
+Windows executable; it does not set the executable's CLI version itself.
+
+At normal startup, validate flags, resolve paths, verify the input directory exists and
 can be read, resolve the DSC executable, and ensure the results directory can be
 used. Keep input and output directories separate. Create the results directory
 if missing using restrictive permissions; never create a missing input directory

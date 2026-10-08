@@ -46,6 +46,13 @@ Double-click the downloaded MSI and approve elevation. It installs and starts
 the **dscd** service (**DSC Reconciliation Daemon**). The MSI does not install DSC
 or change PATH.
 
+### Check the version
+
+Run `dscd --version` (or `.\dscd.exe --version` from its installation directory
+on Windows). It prints `dscd <version>` to stdout and exits without requiring DSC
+or configuration directories. Release binaries report the full release tag,
+such as `dscd v0.0.2`; unstamped source builds report `dscd dev`.
+
 ### Add configurations
 
 As an administrator, publish your DSC `.yaml` or `.json` documents directly in
@@ -138,6 +145,11 @@ if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
 $unformatted = @(gofmt -l .)
 if ($LASTEXITCODE -ne 0 -or $unformatted.Count) { throw 'Formatting check failed' }
 ```
+
+To embed a version in a source build, add
+`-ldflags "-X main.version=v0.0.2"` to `go build`. Release archive builds and the
+Linux package build script stamp the release tag automatically; the release MSI
+uses the same stamped executable as the Windows archive.
 
 Normal tests use temporary files, fakes and controlled helper executables, not
 DSC. They do not install services or change machine configuration.
@@ -249,6 +261,7 @@ exceeding the 30-second shutdown bound exits nonzero.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
+| `--version` | `false` | Print the dscd build version to stdout and exit without daemon startup. |
 | `-config-dir` | Linux `/etc/dsc/config.d`; Windows `%ProgramData%\dsc\config.d` | Existing readable input directory. |
 | `-results-dir` | Linux `/var/lib/dsc/results.d`; Windows `%ProgramData%\dsc\results.d` | Results directory, privately created if absent. |
 | `-dsc-path` | `dsc` | Executable path or name, resolved once at startup through PATH/PATHEXT. |

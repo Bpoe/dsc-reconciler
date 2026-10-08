@@ -33,6 +33,7 @@ for format in deb rpm; do
     cmp packaging/systemd/dscd.service "$root/usr/lib/systemd/system/dscd.service"
     cmp LICENSE "$root/usr/share/licenses/dscd/LICENSE"
     "$root/usr/bin/dscd" -help
+    [[ $("$root/usr/bin/dscd" --version) == "dscd $VERSION" ]]
     grep -Fx 'ExecStart=/usr/bin/dscd -config-dir /etc/dsc/config.d -results-dir /var/lib/dsc/results.d -dsc-path /usr/bin/dsc' "$root/usr/lib/systemd/system/dscd.service"
     # Supply only system targets in the extracted root; never install onto the host.
     for target in sysinit basic shutdown local-fs multi-user; do

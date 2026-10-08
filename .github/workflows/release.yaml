@@ -80,8 +80,11 @@ jobs:
           $dist = Join-Path $env:RUNNER_TEMP 'release-dist'
           New-Item -ItemType Directory -Path $bin, $docs, $windows, $dist -Force | Out-Null
           $executable = Join-Path $bin 'dscd.exe'
-          go build -trimpath -o $executable ./cmd/dscd
+          go build -trimpath -ldflags "-X main.version=$env:RELEASE_VERSION" -o $executable ./cmd/dscd
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $reportedVersion = & $executable --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($reportedVersion -cne "dscd $env:RELEASE_VERSION") { throw 'Unexpected dscd version.' }
           & $executable -help
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item README.md, LICENSE, AGENTS.md -Destination $package
@@ -107,7 +110,8 @@ jobs:
           package="$RUNNER_TEMP/$name"
           dist="$RUNNER_TEMP/release-dist"
           mkdir -p "$package/bin" "$package/docs" "$package/packaging" "$dist"
-          go build -trimpath -o "$package/bin/dscd" ./cmd/dscd
+          go build -trimpath -ldflags "-X main.version=$RELEASE_VERSION" -o "$package/bin/dscd" ./cmd/dscd
+          [[ $("$package/bin/dscd" --version) == "dscd $RELEASE_VERSION" ]]
           "$package/bin/dscd" -help
           cp README.md LICENSE AGENTS.md "$package/"
           cp docs/design.md "$package/docs/"

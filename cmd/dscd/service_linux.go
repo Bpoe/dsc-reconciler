@@ -13,6 +13,6 @@ func platformRun(args []string) error {
 	defer cancel()
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	return boundedRun(ctx, func() error {
-		return run(ctx, args, os.Stderr, logger, func() {})
+		return run(ctx, args, os.Stdout, os.Stderr, logger, func() {})
 	}, shutdownTimeout)
 }
