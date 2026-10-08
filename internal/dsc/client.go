@@ -135,12 +135,15 @@ func (c *Client) Start(ctx context.Context) (*Session, error) {
 // Execute submits captured input strings. A nonnil error means the session is
 // unusable and has been terminated; normal DSC failures are only in the Result.
 func (s *Session) Execute(ctx context.Context, input Input) (r Result, sessionErr error) {
+	if input.Operation != OperationSet && input.Operation != OperationTest {
+		return InputFailure(input, errors.New("operation must be set or test")), nil
+	}
 	start := time.Now()
 	r = newResult(input, start)
 	defer func() { r.finish(start) }()
 	deadline, stop := context.WithTimeout(ctx, s.timeout)
 	defer stop()
-	arguments := map[string]any{"operation": "set", "configuration": input.ConfigurationText}
+	arguments := map[string]any{"operation": input.Operation, "configuration": input.ConfigurationText}
 	if input.Parameters != "" {
 		arguments["parameters"] = input.ParametersText
 	}

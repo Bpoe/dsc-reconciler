@@ -34,7 +34,7 @@ func TestRealDSCParameterFiles(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	failed, err := session.Execute(context.Background(), Input{Configuration: "invalid.yaml", ConfigurationText: "not a configuration"})
+	failed, err := session.Execute(context.Background(), Input{Configuration: "invalid.yaml", Operation: OperationSet, ConfigurationText: "not a configuration"})
 	if err != nil || failed.Error == nil || failed.Error.Kind != "dsc" {
 		t.Fatalf("expected an ordinary DSC error on the reusable session: %+v (%v)", failed.Error, err)
 	}
@@ -65,7 +65,7 @@ resources:
 		for _, parameter := range parameters {
 			t.Run(document.ext+"/parameters"+parameter.ext, func(t *testing.T) {
 				dir := t.TempDir()
-				in := Input{Configuration: filepath.Join(dir, "echo with spaces"+document.ext), ConfigurationText: document.content}
+				in := Input{Configuration: filepath.Join(dir, "echo with spaces"+document.ext), Operation: OperationSet, ConfigurationText: document.content}
 				if parameter.ext != "" {
 					in.Parameters = filepath.Join(dir, "echo with spaces.parameters"+parameter.ext)
 					in.ParametersText = parameter.content

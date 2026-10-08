@@ -37,7 +37,7 @@ func TestParameterAssociation(t *testing.T) {
 			if err != nil || len(found) != 1 {
 				t.Fatalf("discovery = %+v (%v)", found, err)
 			}
-			want := dsc.Input{Configuration: filepath.Join(dir, test.configuration)}
+			want := dsc.Input{Configuration: filepath.Join(dir, test.configuration), Operation: dsc.OperationSet}
 			if test.parameters != "" {
 				want.Parameters = filepath.Join(dir, test.parameters)
 			}
@@ -68,6 +68,8 @@ func TestConfigurationNames(t *testing.T) {
 	for name, eligible := range map[string]bool{
 		"base.yaml": true, "base.json": true, "base.dsc.yaml": true,
 		"base.parameters.yaml": false, "base.parameters.json": false,
+		"base.dscd.json": false, "base.dscd.yaml": true, "base.dscd.yml": false,
+		"base.DSCD.json": true, "base.dscd.json.tmp": false,
 		"base.parameters.backup.yaml": true, "base.PARAMETERS.yaml": true,
 		"base.yml": false, "base.parameters.yml": false, ".hidden.yaml": false,
 		"base.parameters.yaml.tmp": false, "base.YAML": false,
@@ -79,6 +81,7 @@ func TestConfigurationNames(t *testing.T) {
 	dir := t.TempDir()
 	input(t, dir, "orphan.parameters.yaml")
 	input(t, dir, "orphan.parameters.json")
+	input(t, dir, "orphan.dscd.json")
 	found, err := discover(dir)
 	if err != nil || len(found) != 0 {
 		t.Fatalf("sidecar-only directory: %+v (%v)", found, err)
@@ -95,6 +98,7 @@ func TestAmbiguousInputs(t *testing.T) {
 		{"two parameter formats", []string{"web.yaml", "web.parameters.yaml", "web.parameters.json"}, 1, "multiple parameter files"},
 		{"two configurations with parameters", []string{"web.yaml", "web.json", "web.parameters.yaml"}, 2, "multiple configuration files"},
 		{"two configurations without parameters", []string{"web.yaml", "web.json"}, 2, "multiple configuration files"},
+		{"two configurations with metadata", []string{"web.yaml", "web.json", "web.dscd.json"}, 2, "multiple configuration files"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -112,7 +116,7 @@ func TestAmbiguousInputs(t *testing.T) {
 					t.Fatalf("missing discovery error: %+v", item)
 				}
 				for _, name := range test.files {
-					if !strings.HasSuffix(name, ".parameters.yaml") || test.failures == 1 {
+					if (!strings.HasSuffix(name, ".parameters.yaml") || test.failures == 1) && !strings.HasSuffix(name, ".dscd.json") {
 						if !strings.Contains(item.err.Error(), name) {
 							t.Errorf("error %q missing filename %q", item.err, name)
 						}
