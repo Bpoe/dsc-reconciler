@@ -104,13 +104,19 @@ func helperServer() int {
 			} `json:"params"`
 		}
 		if json.Unmarshal(scanner.Bytes(), &req) != nil || req.JSONRPC != "2.0" || req.ID != lastID+1 ||
-			req.Method != "tools/call" || req.Params.Name != "invoke_dsc_config" || req.Params.Arguments.Operation != "set" {
+			req.Method != "tools/call" || req.Params.Name != "invoke_dsc_config" ||
+			(req.Params.Arguments.Operation != "set" && req.Params.Arguments.Operation != "test") {
 			return 96
 		}
 		lastID = req.ID
 		mode := req.Params.Arguments.Configuration
 		payload := json.RawMessage(validOutput)
 		switch mode {
+		case "test-drift":
+			if req.Params.Arguments.Operation != "test" {
+				return 102
+			}
+			payload = json.RawMessage(`{"metadata":{},"results":[{"result":{"inDesiredState":false}}],"messages":[],"hadErrors":false}`)
 		case "rpc-error":
 			_ = encode.Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": -32602, "message": "private operation diagnostic"}})
 			continue
@@ -233,7 +239,7 @@ func TestSessionNormalFailuresAndInlineInputs(t *testing.T) {
 		{"notifications", "", false}, {"rpc-error", "dsc", false}, {"dsc-error", "dsc", false},
 		{"tool-error", "dsc", false}, {"stderr-flood", "", false}, {"success", "", false},
 	} {
-		in := Input{Configuration: "a.yaml", ConfigurationText: test.mode}
+		in := Input{Configuration: "a.yaml", Operation: OperationSet, ConfigurationText: test.mode}
 		if test.parameters {
 			in.Parameters = "a.parameters.json"
 			if test.mode == "inline" {
@@ -249,6 +255,9 @@ func TestSessionNormalFailuresAndInlineInputs(t *testing.T) {
 		}
 		if r.ExitCode != nil || r.Stderr != "" || session.cmd.Process.Pid != pid {
 			t.Fatalf("invented per-attempt process diagnostics or replaced session: %+v", r)
+		}
+		if r.Operation == nil || *r.Operation != in.Operation {
+			t.Fatalf("operation not recorded: %+v", r)
 		}
 		if r.StartedAt.IsZero() || r.FinishedAt.IsZero() || r.DurationMS < 0 {
 			t.Fatal("missing timing")
@@ -273,7 +282,7 @@ func TestProtocolFailuresTerminateSession(t *testing.T) {
 	for _, mode := range []string{"mismatch", "malformed", "structured", "exit", "partial", "stdout-limit"} {
 		t.Run(mode, func(t *testing.T) {
 			s := startSession(t, client, context.Background())
-			r, err := s.Execute(context.Background(), Input{Configuration: "a.yaml", ConfigurationText: mode})
+			r, err := s.Execute(context.Background(), Input{Configuration: "a.yaml", Operation: OperationSet, ConfigurationText: mode})
 			if err == nil || r.Error == nil || r.Outcome != "failed" || !s.closed {
 				t.Fatalf("protocol failure was not fatal to session: %+v %v", r, err)
 			}
@@ -293,7 +302,7 @@ func TestRequestTimeoutAndCancellation(t *testing.T) {
 		if canceled {
 			cancel()
 		}
-		r, err := s.Execute(ctx, Input{Configuration: "a.yaml", ConfigurationText: "hang"})
+		r, err := s.Execute(ctx, Input{Configuration: "a.yaml", Operation: OperationSet, ConfigurationText: "hang"})
 		cancel()
 		if err == nil || r.Outcome != "canceled" || r.Error.Kind != "canceled" || !s.closed {
 			t.Fatalf("timeout/cancellation: %+v %v", r, err)
@@ -353,7 +362,7 @@ func TestDescendantCleanup(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				_, _ = s.Execute(ctx, Input{Configuration: "a.yaml", ConfigurationText: mode})
+				_, _ = s.Execute(ctx, Input{Configuration: "a.yaml", Operation: OperationSet, ConfigurationText: mode})
 			}()
 			if mode != "descendant-exit" {
 				waitFor(t, func() bool { _, err := os.Stat(ready); return err == nil })
@@ -417,7 +426,8 @@ func TestProtocolValidation(t *testing.T) {
 	r := InputFailure(Input{Configuration: "a.yaml"}, errors.New("unreadable"))
 	data, _ := json.Marshal(r)
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(data, &fields) != nil || len(fields) != 10 || string(fields["exitCode"]) != "null" {
+	if json.Unmarshal(data, &fields) != nil || len(fields) != 11 ||
+		string(fields["exitCode"]) != "null" || string(fields["operation"]) != "null" {
 		t.Fatal("changed envelope")
 	}
 }
@@ -427,7 +437,7 @@ func TestBlockedRequestWriteIsCanceled(t *testing.T) {
 	t.Setenv("DSCD_TEST_NO_READ", "1")
 	s := startSession(t, client, context.Background())
 	s.timeout = 100 * time.Millisecond
-	r, err := s.Execute(context.Background(), Input{Configuration: "a.yaml", ConfigurationText: strings.Repeat("x", 2<<20)})
+	r, err := s.Execute(context.Background(), Input{Configuration: "a.yaml", Operation: OperationSet, ConfigurationText: strings.Repeat("x", 2<<20)})
 	if err == nil || r.Outcome != "canceled" || !s.closed || !processStopped(s.cmd.Process.Pid) {
 		t.Fatalf("blocked write wasn't canceled: %+v %v", r, err)
 	}
@@ -465,6 +475,36 @@ func TestFrameLimitsAndToolShapes(t *testing.T) {
 	for _, raw := range []string{`{}`, `{"structuredContent":null}`, `{"structuredContent":[]}`, `{"isError":null}`, `{"isError":"false"}`} {
 		if _, _, _, err := parseToolResult(json.RawMessage(raw)); err == nil {
 			t.Errorf("accepted malformed tool result %s", raw)
+		}
+	}
+}
+
+func TestSessionMixedOperationsAndDrift(t *testing.T) {
+	client, _ := helperClient(t)
+	s := startSession(t, client, context.Background())
+	for _, operation := range []Operation{OperationSet, OperationTest, OperationSet} {
+		in := Input{Configuration: "a.yaml", Operation: operation, ConfigurationText: "success"}
+		if operation == OperationTest {
+			in.ConfigurationText = "test-drift"
+		}
+		r, err := s.Execute(context.Background(), in)
+		if err != nil || r.Outcome != "succeeded" || r.Error != nil ||
+			r.Operation == nil || *r.Operation != operation || r.ExitCode != nil {
+			t.Fatalf("%s: %+v (%v)", operation, r, err)
+		}
+		if operation == OperationTest && !strings.Contains(string(r.DSCResult), `"inDesiredState":false`) {
+			t.Fatal("lost desired-state information")
+		}
+	}
+}
+
+func TestExecuteRejectsInvalidOperation(t *testing.T) {
+	// No process or pipes: invalid operations must be rejected before submission.
+	s := &Session{}
+	for _, operation := range []Operation{"", "apply"} {
+		r, err := s.Execute(context.Background(), Input{Configuration: "a.yaml", Operation: operation})
+		if err != nil || r.Outcome != "failed" || r.Error == nil || r.Error.Kind != "input" || r.Operation != nil {
+			t.Fatalf("invalid operation: %+v (%v)", r, err)
 		}
 	}
 }

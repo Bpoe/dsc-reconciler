@@ -9,11 +9,21 @@ import (
 	"time"
 )
 
-// Input holds source identity and immutable UTF-8 text captured by the reconciler.
-// Paths identify inputs; the server receives only ConfigurationText and ParametersText.
+// Operation is the execution policy submitted to DSC.
+type Operation string
+
+// Supported configuration operations.
+const (
+	OperationSet  Operation = "set"
+	OperationTest Operation = "test"
+)
+
+// Input holds source identity, validated operation and immutable UTF-8 text.
+// Paths identify inputs; the server receives only the operation and captured text.
 type Input struct {
 	Configuration     string
 	Parameters        string
+	Operation         Operation
 	ConfigurationText string
 	ParametersText    string
 }
@@ -39,6 +49,7 @@ type Failure struct {
 type Result struct {
 	SchemaVersion int             `json:"schemaVersion"`
 	Configuration string          `json:"configuration"`
+	Operation     *Operation      `json:"operation"`
 	Parameters    string          `json:"parameters,omitempty"`
 	InputHash     string          `json:"inputHash,omitempty"`
 	StartedAt     time.Time       `json:"startedAt"`
@@ -53,6 +64,9 @@ type Result struct {
 
 func newResult(input Input, start time.Time) Result {
 	r := Result{SchemaVersion: 1, Configuration: filepath.Base(input.Configuration), StartedAt: start.UTC(), Outcome: "succeeded"}
+	if input.Operation == OperationSet || input.Operation == OperationTest {
+		r.Operation = &input.Operation
+	}
 	if input.Parameters != "" {
 		r.Parameters = filepath.Base(input.Parameters)
 	}

@@ -18,13 +18,15 @@ import (
 	"github.com/Bpoe/dsc-reconciler/internal/results"
 )
 
-func TestHashFramingUnchanged(t *testing.T) {
-	in := dsc.Input{Configuration: "a.yaml", Parameters: "a.parameters.json", ConfigurationText: "configuration", ParametersText: "parameters"}
+func TestHashFraming(t *testing.T) {
+	in := dsc.Input{Configuration: "a.yaml", Parameters: "a.parameters.json", Operation: dsc.OperationTest, ConfigurationText: "configuration", ParametersText: "parameters"}
 	config := sha256.Sum256([]byte(in.ConfigurationText))
 	params := sha256.Sum256([]byte(in.ParametersText))
-	bytes := append([]byte("dscd-input-v1\x00"), config[:]...)
+	bytes := append([]byte("dscd-input-v2\x00"), config[:]...)
 	bytes = append(bytes, 1)
 	bytes = append(bytes, params[:]...)
+	bytes = append(bytes, 0)
+	bytes = append(bytes, []byte("test")...)
 	expected := fmt.Sprintf("sha256:%x", sha256.Sum256(bytes))
 	if inputHash(in) != expected {
 		t.Fatal("hash framing changed")
@@ -71,7 +73,7 @@ func TestInputHash(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dir := t.TempDir()
-			in := dsc.Input{Configuration: filepath.Join(dir, "web.yaml"), Parameters: filepath.Join(dir, "web.parameters.json")}
+			in := dsc.Input{Configuration: filepath.Join(dir, "web.yaml"), Parameters: filepath.Join(dir, "web.parameters.json"), Operation: dsc.OperationSet}
 			write := func(path, content string) {
 				t.Helper()
 				if err := os.WriteFile(path, []byte(content), 0600); err != nil {
@@ -101,7 +103,7 @@ func TestInputHash(t *testing.T) {
 
 func TestInputHashSeparatesFilesAndPresence(t *testing.T) {
 	dir := t.TempDir()
-	in := dsc.Input{Configuration: filepath.Join(dir, "web.yaml"), Parameters: filepath.Join(dir, "web.parameters.json")}
+	in := dsc.Input{Configuration: filepath.Join(dir, "web.yaml"), Parameters: filepath.Join(dir, "web.parameters.json"), Operation: dsc.OperationSet}
 	seen := make(map[string]bool)
 	for _, contents := range [][2]string{{"ab", "c"}, {"a", "bc"}, {"abc", ""}} {
 		for path, value := range map[string]string{in.Configuration: contents[0], in.Parameters: contents[1]} {

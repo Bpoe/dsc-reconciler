@@ -2,8 +2,9 @@
 
 `dsc-reconciler` is a lightweight local reconciliation daemon for DSC. The `dscd`
 process continuously discovers DSC configuration documents in a configured directory,
-evaluates them against the local machine, applies any required changes, and records
-the results.
+evaluates them against the local machine, applies any required changes by default,
+and records the results. Optional per-configuration metadata can select audit-only
+`test` execution instead.
 
 The project is intentionally simple. `dscd` does not own configuration authoring,
 composition, or parameter processing; it treats DSC configuration and parameter files
@@ -11,8 +12,9 @@ as inputs and delegates their interpretation and execution to DSC. This makes it
 useful both as a standalone local desired-state reconciler and as a building block
 for higher-level configuration control planes.
 
-There is no server, remote configuration store, watcher, document parser or
-resource model. DSC owns testing and applying configurations. See the
+There is no server, remote configuration store, watcher, DSC document parser or
+resource model. `dscd` parses only its own metadata; DSC owns testing and applying
+configurations. See the
 [design and result contract](docs/design.md) and [contributor guidance](AGENTS.md).
 
 ## Prerequisites and compatibility
@@ -155,7 +157,9 @@ proceeding with a new candidate version; reruns do not overwrite existing releas
 ## Foreground execution
 
 Start with an empty directory if you only want to inspect startup/shutdown.
-Adding a DSC document authorizes DSC to modify machine state.
+**No metadata file means `set`: adding a DSC document normally authorizes DSC to
+enforce its desired state and modify the machine.** Use explicit `test` metadata
+for audit-only execution.
 
 Linux:
 
@@ -199,13 +203,15 @@ Discovery is nonrecursive. Ordinary files ending in case-sensitive `.yaml` or
 directories, symlinks, `.yml` files, uppercase extensions and temporary suffixes
 such as `.yaml.tmp` are ignored. Go string ordering puts
 `10-a.yaml` before `20-b.yaml`. Each pass rediscovers documents; unchanged files
-are reapplied because machine state may drift. Reconcile immediately on startup,
-then wait the full interval after each completed pass before starting the next.
+are executed with their effective operation because machine state may drift.
+Reconcile immediately on startup, then wait the full interval after each completed
+pass before starting the next.
 Passes never overlap, and slow passes do not cause catch-up runs.
 
 Each pass normally starts **one short-lived `dsc server`**, initializes its
-MCP/JSON-RPC stdio session, and uses `invoke_dsc_config` to apply each configuration
-sequentially. The server is closed before the pass ends; DSC is not kept alive
+MCP/JSON-RPC stdio session, and uses `invoke_dsc_config` to execute each configuration
+sequentially. Different configurations can use `set` and `test` in the same
+session. The server is closed before the pass ends; DSC is not kept alive
 during the interval. Empty directories start no server. Input errors do not
 require starting a server.
 
@@ -215,8 +221,9 @@ configuration starts a fresh one. This restart is fault recovery, not a retry of
 the failed input. Server startup/initialization failure publishes failures for
 remaining readable inputs, reports a pass-level error and retries next pass.
 
-`*.parameters.yaml` and `*.parameters.json` are reserved sidecars, never standalone
-configurations. Match by the configuration filename without its final extension:
+`*.parameters.yaml`, `*.parameters.json`, and `*.dscd.json` are reserved input
+files, never standalone configurations. Match by the configuration filename
+without its final extension:
 
 ```text
 base.yaml       + base.parameters.yaml
@@ -231,11 +238,55 @@ receive failed input results and unrelated configurations continue. Orphan
 sidecars are ignored. Missing/unreadable or nonregular selected sidecars fail
 rather than silently falling back to parameter defaults.
 
+### Per-configuration metadata
+
+Optional `<basename>.dscd.json` metadata controls one configuration's execution
+policy. Metadata is always JSON and is owned and parsed by `dscd` using
+`encoding/json`; DSC configuration and parameter documents remain opaque.
+
+```text
+web.yaml
+web.parameters.yaml
+web.dscd.json
+```
+
+For audit-only execution, `web.dscd.json` contains:
+
+```json
+{
+  "operation": "test"
+}
+```
+
+Only `operation` has behavior today. It accepts exactly `"set"` (enforce desired
+state) or `"test"` (audit only). No metadata file, `{}`, or an omitted `operation`
+means **`set`**. Unsupported properties are ignored. An explicit invalid value,
+including `null` or an empty string, never falls back to `set`.
+
+Metadata association is independent of serialization: `web.json` or `web.yaml`
+can use either parameter format and the same `web.dscd.json` convention.
+Metadata and orphan metadata files are excluded from independent reconciliation.
+There is no metadata YAML support: `*.dscd.yaml` is still an ordinary DSC
+configuration under the existing `.yaml` discovery rule, not metadata;
+`*.dscd.yml` is ignored.
+
+Malformed, unreadable, or nonregular metadata fails only its configuration with
+an `input` result, without invoking DSC; later configurations continue. A selected
+metadata file disappearing during the pass is also a failure, not permission to
+enforce by default. Publish metadata before its configuration when initially
+enabling audit-only execution.
+
+A successful `test` that reports `inDesiredState: false` is still a successful
+execution. `dscd` preserves the structured `dscResult` for consumers to inspect
+without interpreting individual resources.
+
+### DSC inputs
+
 DSC owns parsing, validation, resource discovery, parameter interpretation,
 defaults, substitution, secure values and execution. `dscd` does not inspect
 individual resources or merge either input. It sends the captured configuration
-and optional sidecar text inline through `invoke_dsc_config(operation: "set")`;
-DSC handles testing and applying changes.
+and optional sidecar text inline through `invoke_dsc_config` with the effective
+`set` or `test` operation; DSC handles resource semantics.
 
 **Migration from CLI parameter files:** the server tool expects a direct mapping:
 
@@ -250,10 +301,13 @@ sidecar unchanged rather than parsing or translating it.
 
 Producers must be trusted and publish complete documents by temporary-file
 replacement, not in-place editing. The daemon opens each input once per attempt,
-captures its UTF-8 text, hashes that snapshot, and sends the same text to DSC.
+captures its UTF-8 text, hashes that snapshot together with the effective operation,
+and sends the same text and operation to DSC. Raw metadata bytes are not hashed:
+formatting changes or ignored properties do not affect identity.
 DSC never reopens the input paths: **bytes hashed equal bytes submitted**.
-Replacing either source after capture does not affect that attempt. Capturing a
-pair is not an atomic producer transaction; producers still coordinate updates.
+Replacing any input after capture does not affect that attempt. Capturing
+configuration, parameters and metadata is not an atomic producer transaction;
+producers still coordinate updates.
 Inline inputs do not provide the CLI's implicit file-root/`DSC_CONFIG_ROOT`
 context; documents must not rely on it.
 Keep executable/resource directories and input/output parents non-writable by
@@ -268,17 +322,26 @@ profile, PATH or current directory.
 before executing the document. Removing or renaming an input does not remove old
 results or undo machine changes.
 
-Every published result retains the ten fields below, including explicit nulls.
-Two additive fields are included when available: `parameters` is the sidecar
-basename, and `inputHash` is the combined SHA-256 identity of the exact submitted
-bytes. Changing only the parameter file changes the identity; an absent and an
-empty sidecar differ. Ambiguous or unreadable inputs have no hash. Startup failures
-can retain the captured hash even though submission could not occur.
+Every published result retains the fields below, including explicit nulls.
+The additive `operation` field records the effective operation, including implicit
+`set`, and always matches the operation submitted when DSC is invoked. It is
+`null` when invalid metadata or an earlier input failure prevents resolving an
+operation; no DSC invocation occurs in that case.
+Two fields are included when available: `parameters` is the sidecar basename,
+and `inputHash` is the combined SHA-256 identity of the exact submitted
+configuration/parameter bytes and effective operation. Changing parameters or
+switching `set`/`test` changes the identity; absent and empty parameters differ.
+Omitted and explicit `set` metadata have the same hash. The operation-aware hash
+uses the new `dscd-input-v2` framing, so hashes change from earlier versions even
+for default `set`. The result envelope remains schema version 1. Ambiguous,
+unreadable, or invalid inputs have no hash. Startup failures can retain the
+captured hash even though submission could not occur.
 
 ```json
 {
   "schemaVersion": 1,
   "configuration": "10-a.yaml",
+  "operation": "set",
   "startedAt": "2026-10-05T18:00:00Z",
   "finishedAt": "2026-10-05T18:00:01Z",
   "durationMs": 1000,
@@ -301,7 +364,8 @@ forced termination. `stderr` remains present but is empty: a shared server strea
 cannot be reliably attributed to one configuration.
 See the [design](docs/design.md#result-contract) for precedence and field semantics.
 
-Combined configuration/parameter input is limited to **16 MiB** per attempt.
+Combined configuration/parameter input is limited to **16 MiB** per attempt;
+metadata has a separate **16 MiB** limit.
 Invalid UTF-8 is rejected to avoid changing bytes when encoding JSON strings.
 Each newline-delimited JSON-RPC stdout frame is limited to **16 MiB**; malformed
 or oversized responses fail the attempt and destroy the session. Stderr is always

@@ -47,7 +47,11 @@ func TestRealProcessPerPassAndRecovery(t *testing.T) {
 			if err := os.Mkdir(dir, 0700); err != nil {
 				t.Fatal(err)
 			}
-			for name, text := range map[string]string{"a.yaml": test.mode, "b.yaml": "success", "c.json": "success"} {
+			for name, text := range map[string]string{
+				"a.yaml": test.mode, "b.yaml": "test drift", "c.json": "success",
+				"b.dscd.json": `{"operation":"test"}`, "b.parameters.json": "private-sidecar-value",
+				"c.dscd.json": `{"operation":"set"}`,
+			} {
 				if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0600); err != nil {
 					t.Fatal(err)
 				}
@@ -88,6 +92,16 @@ func TestRealProcessPerPassAndRecovery(t *testing.T) {
 					}
 					if result.Outcome != expected || result.InputHash == "" {
 						t.Fatalf("%s: %+v", name, result)
+					}
+					operation := dsc.OperationSet
+					if name == "b.yaml" {
+						operation = dsc.OperationTest
+						if !strings.Contains(string(result.DSCResult), `"inDesiredState":false`) {
+							t.Fatal("lost test drift result")
+						}
+					}
+					if result.Operation == nil || *result.Operation != operation {
+						t.Fatalf("persisted operation: %+v", result)
 					}
 					if result.Outcome == "succeeded" {
 						if result.ExitCode != nil || result.Stderr != "" {
@@ -153,8 +167,9 @@ func resultServer() int {
 			Method string `json:"method"`
 			Params struct {
 				Arguments struct {
-					Configuration string  `json:"configuration"`
-					Parameters    *string `json:"parameters"`
+					Operation     dsc.Operation `json:"operation"`
+					Configuration string        `json:"configuration"`
+					Parameters    *string       `json:"parameters"`
 				} `json:"arguments"`
 			} `json:"params"`
 		}
@@ -189,11 +204,20 @@ func resultServer() int {
 				time.Sleep(time.Hour)
 			}
 		}
+		resourceResults := []any{}
+		if req.Params.Arguments.Configuration == "test drift" {
+			if req.Params.Arguments.Operation != dsc.OperationTest {
+				return 6
+			}
+			resourceResults = append(resourceResults, map[string]any{"result": map[string]any{"inDesiredState": false}})
+		} else if req.Params.Arguments.Operation != dsc.OperationSet {
+			return 6
+		}
 		if req.Params.Arguments.Parameters != nil && *req.Params.Arguments.Parameters != "private-sidecar-value" {
 			return 5
 		}
 		encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{
-			"structuredContent": map[string]any{"result": map[string]any{"metadata": map[string]any{"serverPID": os.Getpid()}, "results": []any{}, "messages": []any{}, "hadErrors": false}},
+			"structuredContent": map[string]any{"result": map[string]any{"metadata": map[string]any{"serverPID": os.Getpid()}, "results": resourceResults, "messages": []any{}, "hadErrors": false}},
 		}})
 	}
 	return 0
@@ -207,6 +231,7 @@ func TestEndToEndPublicationAndContinuation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, data := range map[string]string{
+		"05-metadata.yaml": "opaque input", "05-metadata.dscd.json": `{"operation":"PRIVATE-METADATA"}`,
 		"10-failure.yaml": "invalid output", "20-success.json": "opaque input",
 		"20-success.parameters.yaml": "private-sidecar-value",
 	} {
@@ -256,7 +281,7 @@ func TestEndToEndPublicationAndContinuation(t *testing.T) {
 	if runErr != nil {
 		t.Fatal(runErr)
 	}
-	for name, outcome := range map[string]string{"10-failure.yaml": "failed", "20-success.json": "succeeded"} {
+	for name, outcome := range map[string]string{"05-metadata.yaml": "failed", "10-failure.yaml": "failed", "20-success.json": "succeeded"} {
 		data, err := os.ReadFile(filepath.Join(output, name+".result.json"))
 		if err != nil {
 			t.Fatal(err)
@@ -265,7 +290,15 @@ func TestEndToEndPublicationAndContinuation(t *testing.T) {
 		if err := json.Unmarshal(data, &result); err != nil || result.Configuration != name || result.Outcome != outcome {
 			t.Fatalf("unexpected result %s: %s (%v)", name, data, err)
 		}
-		if result.InputHash == "" || strings.Contains(string(data), "private-sidecar-value") {
+		if name == "05-metadata.yaml" {
+			if result.InputHash != "" || result.Operation != nil || result.Error == nil || result.Error.Kind != "input" ||
+				!strings.Contains(string(data), `"operation":null`) {
+				t.Fatalf("invalid metadata result: %s", data)
+			}
+		} else if result.InputHash == "" || result.Operation == nil || *result.Operation != dsc.OperationSet {
+			t.Fatalf("missing input hash or effective operation: %s", data)
+		}
+		if strings.Contains(string(data), "private-sidecar-value") || strings.Contains(string(data), "PRIVATE-METADATA") {
 			t.Fatalf("missing input hash or leaked parameters in %s", data)
 		}
 		if name == "20-success.json" && result.Parameters != "20-success.parameters.yaml" {
@@ -273,7 +306,7 @@ func TestEndToEndPublicationAndContinuation(t *testing.T) {
 		}
 	}
 	files, err := os.ReadDir(output)
-	if err != nil || len(files) != 2 {
+	if err != nil || len(files) != 3 {
 		t.Fatalf("unexpected result files (sidecar was executed?): %v (%v)", files, err)
 	}
 }

@@ -89,6 +89,9 @@ func (r *Reconciler) Pass(ctx context.Context) (passErr error) {
 		hash := ""
 		err = candidate.err
 		input := candidate.input
+		if err == nil && candidate.metadataPath != "" {
+			input.Operation, err = readMetadata(ctx, candidate.metadataPath)
+		}
 		if err == nil {
 			input, err = readInput(ctx, input)
 			if err == nil {
@@ -133,7 +136,7 @@ func (r *Reconciler) Pass(ctx context.Context) (passErr error) {
 		}
 		r.log.Log(ctx, level, "DSC attempt completed", "config_path", path, "outcome", result.Outcome,
 			"duration", time.Duration(result.DurationMS)*time.Millisecond, "exit_code", result.ExitCode,
-			"parameters_path", input.Parameters, "error_kind", kind)
+			"parameters_path", input.Parameters, "operation", result.Operation, "error_kind", kind)
 		publication, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		err = r.writer.Write(publication, result)
 		cancel()

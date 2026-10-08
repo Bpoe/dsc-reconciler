@@ -18,7 +18,8 @@ the existence of implementation or CI configuration alone is not a test result.
 
 ## Purpose and scope
 
-`dscd` repeatedly applies local desired state. Its job is to discover, order,
+`dscd` repeatedly applies local desired state by default, or audits it when
+per-configuration metadata selects `test`. Its job is to discover, order,
 execute, record, and repeat. It requires local configuration files and the DSC
 executable; it has no network service dependency of its own. DSC resources may
 have their own dependencies.
@@ -54,12 +55,13 @@ The repository layout and coding rules are in [AGENTS.md](../AGENTS.md).
 | --- | --- | --- |
 | Daemon entry point | Load options, configure logging, connect components, establish cancellation, report process exit. | No discovery or DSC outcome logic. |
 | Configuration loader | Typed daemon options and validation. | No DSC document parsing. |
-| Reconciliation loop | Discover and sort documents; coordinate periodic execution and publication. | No process construction or file replacement mechanics. |
+| Reconciliation loop | Discover and sort documents; parse daemon metadata; coordinate periodic execution and publication. | No DSC document parsing, process construction or file replacement mechanics. |
 | DSC client | Own pass-scoped DSC servers, MCP initialization and serial JSON-RPC requests; produce execution results. | No discovery, input reads/hashing or result-file writes. |
 | Result writer | Encode the result contract and publish files safely. | No DSC invocation or resource-state interpretation. |
 
-The loop supplies captured configuration/parameter strings, source identity and
-a cancellation context to a DSC session, then gives its result to the writer.
+The loop supplies captured configuration/parameter strings, the effective
+operation, source identity and a cancellation context to a DSC session, then
+gives its result to the writer.
 Execution and publication have
 separate errors. A result remains useful on execution failure: its source
 identity, timestamps, and diagnostics must still be populated.
@@ -121,11 +123,14 @@ suffixes such as `example.yaml.tmp`. Sort configurations by filename using Go
 string ordering.
 
 The suffixes `*.parameters.yaml` and `*.parameters.json` are reserved for
-parameter sidecars. These files are never independently reconciled, including
-orphan sidecars. For each configuration, remove its final extension and look for
-`<basename>.parameters.yaml` or `<basename>.parameters.json` in the same directory.
+parameter sidecars; `*.dscd.json` is reserved for daemon metadata. These files
+are never independently reconciled, including orphan files. For each
+configuration, remove its final extension and look for
+`<basename>.parameters.yaml` or `<basename>.parameters.json`, and optional
+`<basename>.dscd.json` in the same directory.
 Association uses exact, case-sensitive basenames. Configuration and parameter
 serialization formats may differ: `web.yaml` with `web.parameters.json` is valid.
+Metadata association is independent of either format.
 
 Duplicate parameter formats are an error; there is no precedence. Duplicate
 configuration basenames (`web.yaml` and `web.json`) are also an error, even
@@ -135,8 +140,8 @@ configurations continue. A selected sidecar that is a directory, symlink or
 unreadable file is an input failure, not permission to silently use defaults.
 
 Each pass uses that ordered list and runs one document at a time. Recheck that a
-configuration and selected sidecar are still readable regular files before
-reading them once into memory; if either disappeared or became unreadable,
+configuration and selected parameter/metadata files are still readable regular
+files before reading them once into memory; if any disappeared or became unreadable,
 record an input failure and continue. This is operational
 validation, not a security boundary against a malicious local writer. Trusted
 producers must publish using temporary files and replacement, not in-place edits.
@@ -181,6 +186,51 @@ files remain until a producer or operator removes them. They are historical
 evidence of a last attempt, not proof that the corresponding input still exists.
 Renaming a document creates a new identity and leaves the old result behind.
 
+### Per-configuration metadata
+
+`dscd` owns and parses optional JSON metadata under `internal/reconcile` using
+`encoding/json`. DSC configuration and parameter documents remain opaque.
+The only supported property today is `operation`, whose values are exactly
+`"set"` and `"test"`. Unknown properties are ignored for additive compatibility.
+Absent metadata, `{}`, and an omitted `operation` mean `set`. An explicit invalid
+value (including `null`, non-string values, empty strings or other spellings)
+does not fall back to `set`.
+
+For example:
+
+```text
+web.yaml
+web.parameters.yaml
+web.dscd.json
+```
+
+`web.dscd.json` selects audit-only execution:
+
+```json
+{
+  "operation": "test"
+}
+```
+
+**No metadata file means `set`. Placing a configuration in the input directory
+normally authorizes DSC to enforce its desired state.** Producers opting into
+audit-only behavior must publish metadata before the corresponding configuration;
+multi-file updates are not atomic. Removing metadata restores `set` on the next
+discovery pass.
+
+Metadata must be a JSON object and is bounded to 16 MiB independently of the
+combined 16 MiB configuration/parameter limit. Malformed JSON, invalid operations,
+invalid UTF-8, oversized, unreadable or nonregular metadata produces an `input`
+failure for only its configuration. Diagnostics identify the metadata path
+without echoing its contents or arbitrary values. No DSC invocation occurs,
+and later configurations continue. Metadata selected at discovery that disappears
+before capture fails rather than reverting to `set`.
+
+There is no metadata YAML support: `*.dscd.yaml` remains an ordinary configuration
+under the existing `.yaml` rule, not metadata; `*.dscd.yml` is ignored. There is
+no daemon-wide operation flag, folder-based policy, or per-configuration schedule
+or timeout. Different operations share the same serial, pass-scoped session.
+
 ## DSC server transport and outcome
 
 The compatibility target is **Microsoft DSC 3.3.0**, the stable release with
@@ -199,7 +249,7 @@ and tool capabilities, then send `notifications/initialized` without an ID.
 Initialization is bounded by the smaller of ten seconds and the execution timeout.
 
 Each configuration sends one `tools/call` request naming `invoke_dsc_config`,
-with arguments `operation: "set"`, `configuration: "<captured text>"`, and
+with arguments `operation: "<effective set or test>"`, `configuration: "<captured text>"`, and
 `parameters: "<captured text>"` only when a sidecar exists. IDs increase within
 each session, starting configuration requests at 2. Only one request is outstanding.
 Validate JSON-RPC version, response shape and exact ID. Ignore well-formed
@@ -227,11 +277,14 @@ with object-valued `metadata`, array-valued `results` and `messages`, and a bool
 `hadErrors`. Preserve its payload without interpreting individual resource properties
 or rejecting unknown fields. Success means a successful RPC with a valid DSC result
 and `hadErrors: false`, not a per-operation process exit or permanent compliance.
+A successful `test` with resource-level `inDesiredState: false` reports drift,
+not an execution failure. Preserve that information in `dscResult`; do not
+translate resource state into daemon outcomes.
 
 Configuration and parameter contents remain opaque to `dscd`. DSC owns parsing,
 validation, resource discovery, parameter interpretation, defaults, substitution,
 secure values, testing and configuration execution. The daemon does
-not parse YAML/JSON inputs, merge documents or parameters, interpolate values,
+not parse those YAML/JSON documents, merge documents or parameters, interpolate values,
 reinterpret resource identities, or infer dependencies between configurations.
 Two documents that manage conflicting state may continually undo each other;
 document authors must resolve that conflict.
@@ -243,23 +296,31 @@ unchanged and does not unwrap, merge or translate it. Existing wrapped sidecars
 must be updated by their producers. Empty sidecars are sent as empty strings,
 not silently omitted; DSC decides whether they are valid.
 
-The reconciliation input identity includes both configuration and parameter
-content when a sidecar is present. Read each file once per attempt into immutable
-strings, compute the hash from those strings, and submit those exact same strings.
+The reconciliation input identity includes the effective operation, configuration
+content, and parameter content when a sidecar is present. Read each file once per
+attempt into immutable strings, resolve metadata, compute the hash from those
+strings and the operation, and submit those exact same values.
 No input pathname is passed to DSC and DSC never reopens these files. JSON escaping
 does not change the string bytes after decoding: **bytes hashed equal bytes
 submitted**. Reject invalid UTF-8 rather than allowing JSON encoding to replace
 bytes. `inputHash` is `sha256:` followed
 by the lowercase hexadecimal SHA-256 of the concatenation of
-`"dscd-input-v1\0"`, the 32-byte configuration digest, a one-byte sidecar-present
-marker (0 or 1), and, when present, the 32-byte parameter digest. This framing
+`"dscd-input-v2\0"`, the 32-byte configuration digest, a one-byte sidecar-present
+marker (0 or 1), the 32-byte parameter digest when present, a zero byte, and the
+UTF-8 effective operation (`set` or `test`). This framing
 distinguishes missing from empty sidecars and keeps file boundaries unambiguous.
-Names are recorded separately; changing either file's bytes changes the hash.
+Names are recorded separately; changing configuration or parameter bytes, or
+the effective operation, changes the hash. Raw metadata bytes are not hashed:
+formatting-only changes and ignored properties leave identity unchanged.
+Absent metadata, omitted operation and explicit `set` produce the same identity.
+The v2 hash framing deliberately changes hashes from the previous v1 framing
+even for `set`, independently of the unchanged result-envelope schema version.
 The hash identifies the exact desired-state input submitted for an attempt,
 not a skip/reconciliation cache key. For input/start failures it may describe a
 captured input that could not be submitted. Replacing a source file after capture
-cannot change that attempt. Reading a pair is not an atomic producer transaction;
-trusted producers must publish complete files and coordinate paired updates.
+cannot change that attempt. Reading configuration, parameters and metadata is not
+an atomic producer transaction; trusted producers must publish complete files
+and coordinate updates.
 Inline submission also provides no source-path `DSC_CONFIG_ROOT` semantics.
 Documents must not rely on the old CLI's implicit file-root context.
 
@@ -287,8 +348,9 @@ The initial envelope uses the following fields:
 | --- | --- | --- |
 | `schemaVersion` | integer | `1` for this envelope contract. |
 | `configuration` | string | Exact source basename, including its extension. |
+| `operation` | string or null | Effective `set` or `test`, including implicit `set`; matches the submitted operation whenever DSC is invoked. Null if metadata or an earlier input failure prevents resolving the operation; DSC is not invoked. |
 | `parameters` | optional string | Selected parameter-sidecar basename; omitted when no unique sidecar was selected. Never contains parameter values. |
-| `inputHash` | optional string | Combined SHA-256 of the captured strings submitted to DSC; omitted when capture fails. Start failures can retain a hash of input not submitted. |
+| `inputHash` | optional string | Combined SHA-256 of captured configuration/parameter strings and effective operation; omitted when capture or metadata validation fails. Start failures can retain a hash of input not submitted. |
 | `startedAt` | string | UTC RFC 3339 timestamp with fractional seconds as needed. |
 | `finishedAt` | string | UTC timestamp in the same format. |
 | `durationMs` | integer | Nonnegative elapsed milliseconds, measured with a monotonic clock. |
@@ -300,7 +362,7 @@ The initial envelope uses the following fields:
 
 An error object contains `kind` and `message`. Initial kinds are `input`, `start`,
 `exit`, `output`, `dsc`, and `canceled`. Cancellation/deadline expiry is `canceled`;
-snapshot failures are `input`, startup/handshake failures `start`, unexpected server
+snapshot/metadata failures are `input`, startup/handshake failures `start`, unexpected server
 EOF/exit `exit`, framing/ID/shape/pipe failures `output`, and valid RPC/tool/DSC
 errors `dsc`.
 An execution deadline is classified as `canceled` with a deadline diagnostic, but
@@ -315,6 +377,7 @@ For example, this complete envelope represents failure to start DSC:
 {
   "schemaVersion": 1,
   "configuration": "10-network.yaml",
+  "operation": "set",
   "startedAt": "2026-10-05T18:00:00Z",
   "finishedAt": "2026-10-05T18:00:00.002Z",
   "durationMs": 2,
@@ -330,8 +393,10 @@ For example, this complete envelope represents failure to start DSC:
 ```
 
 The ten original fields are always present, including explicit nulls. The additive
-`parameters` and `inputHash` fields retain schema version 1 and are present when
-available. The daemon records its
+`operation` field is emitted by this version, and is null if the operation cannot
+be resolved. The additive `parameters` and `inputHash` fields are present when
+available. All retain schema version 1; older results may lack these additions.
+The daemon records its
 own envelope timestamps and duration; it preserves DSC's metadata separately in
 `dscResult`. Do not synthesize successful output. Invalid stdout produces an
 `output` error; it is not embedded as a fabricated DSC JSON object or dumped into
@@ -348,13 +413,14 @@ but empty.
 Schema version 1 is retained: names, outcome classifications, nullable exit codes
 and the nested DSC payload keep their roles. With server transport, consumers
 must use `outcome`/`hadErrors`, not require `exitCode == 0` on success or expect
-per-attempt stderr. The hash framing is unchanged while its capture-to-submission
-guarantee is stronger.
+per-attempt stderr. Operation-aware input hashes use the separately versioned
+v2 framing while preserving the capture-to-submission guarantee.
 
 Readers must tolerate unknown fields and reject unsupported major envelope
-versions. Additive optional fields may retain version 1; changes to field meaning,
-required fields, or existing outcome semantics require a versioned contract
-change. DSC's nested schema has its own version and compatibility requirements.
+versions. Additive fields may retain version 1; readers must still accept older
+v1 records without those fields. Changes to existing field meaning, required
+fields, or outcome semantics require a versioned contract change. DSC's nested
+schema has its own version and compatibility requirements.
 
 There is no in-progress record, attempt history, desired generation, or
 resource-status translation in v1. A reader checks freshness
@@ -416,11 +482,13 @@ The next scheduled attempt is the normal retry opportunity.
 | Shutdown is requested | Stop scheduling, cancel active execution, clean up, and exit normally. |
 
 Use `log/slog`, initially with a JSON handler at info level on stderr. Include
-stable context such as `config_path`, `result_path`, `duration`, `exit_code`, and
+stable context such as `config_path`, `operation`, `result_path`, `duration`, `exit_code`, and
 `error_kind`. Log lifecycle events and attempt summaries. Keep per-entry discovery
 noise at debug level and log errors where handled rather than at every layer.
 DSC output and resource properties may contain secrets: store only in protected
-result files and do not mirror them into routine logs.
+result files and do not mirror them into routine logs. Never log configuration,
+parameter or arbitrary metadata contents; operation logs use only validated
+`set`/`test` values (or null when unresolved).
 
 In foreground mode, `signal.NotifyContext` owns shutdown at the command boundary
 (SIGINT/SIGTERM on Linux, Ctrl+C on Windows). SCM Stop and Shutdown controls

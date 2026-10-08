@@ -76,7 +76,7 @@ or a generic project-layout directory collection. See Go's
 | `cmd/dscd` | Dependency wiring, logging setup, signals, lifecycle, and exit status. |
 | `internal/config` | Typed daemon options, flag parsing, defaults, and validation. |
 | `internal/dsc` | Pass-scoped DSC server processes, MCP initialization, JSON-RPC framing, request timeouts, and execution-result types. |
-| `internal/reconcile` | Discovery, ordering, input snapshots/hashing, the periodic loop, and coordinating execution with result publication. |
+| `internal/reconcile` | Discovery, ordering, daemon metadata parsing, input snapshots/hashing, the periodic loop, and coordinating execution with result publication. |
 | `internal/results` | Result serialization, destination naming, permissions, and safe file replacement. |
 
 Keep `main` boring: load config, create the DSC client and result writer, create
@@ -94,14 +94,47 @@ DSC owns document parsing, validation, resource semantics, and execution. Treat
 configuration documents and parameter sidecars as opaque inputs. Associate
 `.parameters.yaml` and `.parameters.json` files by basename, reject ambiguous
 basenames, and never reconcile sidecars independently. Read each input once,
-hash the captured UTF-8 strings using the existing framing, and submit exactly
-those strings to DSC. The hash identifies the submitted input, not a skip key.
+hash the captured UTF-8 strings and effective operation using the documented
+`dscd-input-v2` framing, and submit exactly those strings and operation to DSC.
+Hash normalized `set`/`test`, not raw metadata bytes: formatting and unsupported
+properties must not change identity. The hash identifies the submitted input,
+not a skip key.
 Do not introduce a YAML parser to
 inspect files DSC can consume. Parsing DSC execution output is a separate,
 necessary boundary responsibility; it does not justify modeling DSC resources.
 
+Optional `<basename>.dscd.json` metadata is owned and parsed by `dscd` with
+`encoding/json` under `internal/reconcile`. Only `operation` has behavior today:
+exactly `set` or `test`. Missing metadata or an omitted operation defaults to
+`set`; unsupported properties are ignored. Metadata files, including orphans,
+are excluded from independent reconciliation. Metadata does not depend on the
+configuration or parameter serialization format. There is no YAML metadata:
+`*.dscd.yaml` retains its ordinary configuration meaning and `*.dscd.yml` is ignored.
+
+For example, `web.yaml`, `web.parameters.yaml`, and `web.dscd.json` form one
+configuration input. To make it audit-only, the metadata contains:
+
+```json
+{
+  "operation": "test"
+}
+```
+
+**No metadata file means `set`: placing a configuration in the directory normally
+authorizes DSC to enforce that desired state.** Producers must publish audit-only
+metadata before its configuration. Malformed/unreadable metadata or an invalid
+explicit operation fails only that configuration, publishes an `input` failure
+without invoking DSC, and does not block later configurations. Never fall back to
+`set` for invalid metadata or log arbitrary metadata contents.
+Persist the effective `operation`, including default `set`, in every result.
+Use null when input failures prevent resolving the operation; do not claim that
+an operation was submitted for an invalid configuration.
+
 Start one short-lived `dsc server` per nonempty executable pass, initialize MCP
-and submit configurations sequentially with `invoke_dsc_config`. Close and reap
+and submit configurations sequentially with `invoke_dsc_config`, using each
+configuration's effective operation in the same session. A successful `test`
+with `inDesiredState: false` is not a daemon execution failure: preserve the raw
+`dscResult` and do not interpret resource state. Close and reap
 the server before waiting for the next pass. Restart within a pass only after a
 server/protocol failure or request timeout; ordinary DSC errors retain the session.
 Do not keep DSC alive between passes, introduce an MCP SDK, or interpret resource
@@ -172,6 +205,8 @@ Prioritize observable behavior:
 - Discovery, filtering, empty directories, and deterministic ordering: files
   created as `20-b.yaml` and `10-a.yaml` execute as `10-a.yaml`, `20-b.yaml`.
 - Continued processing after a document failure and publication of failure results.
+- Metadata association/defaults/validation, mixed operations within a session,
+  operation-aware hashes, persisted operation, and successful tests reporting drift.
 - Immediate first reconciliation, a full interval after each completed pass,
   no catch-up or overlapping passes, and prompt cancellation during the wait.
 - MCP handshake, inline requests and exact input hashes, response IDs and framing,
@@ -181,7 +216,8 @@ Prioritize observable behavior:
 
 The DSC server compatibility target is stable 3.3.0, using the version-tagged
 official server tests and implementation linked in the design. Keep input snapshots
-bounded to 16 MiB combined and stdout JSON-RPC frames to 16 MiB. Drain shared stderr
+bounded to 16 MiB combined, metadata to a separate 16 MiB, and stdout JSON-RPC
+frames to 16 MiB. Drain shared stderr
 without retaining it; per-attempt `stderr` stays empty and RPC-success `exitCode`
 stays null. Never log RPC error text which may contain secrets.
 Windows must attach the suspended process to a
