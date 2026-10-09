@@ -12,7 +12,9 @@ embedded metadata, delegating resource interpretation and execution to DSC. This
 makes it useful both as a standalone local desired-state reconciler and as a building block
 for higher-level configuration control planes.
 
-There is no server, remote configuration store, watcher or DSC resource model.
+There is no network server, remote configuration store or DSC resource model.
+Filesystem notifications trigger targeted reconciliation; periodic full passes
+remain the correctness mechanism when notifications are missed or unavailable.
 `dscd` extracts only its own metadata; DSC owns testing and applying
 configurations. See the
 [design and result contract](docs/design.md) and [contributor guidance](AGENTS.md).
@@ -78,6 +80,13 @@ resources:
 To enforce desired state instead, use `operation: set` or omit the metadata.
 JSON supports the same [embedded metadata](#per-configuration-metadata).
 
+Changes trigger reconciliation of only the affected configuration as soon as the
+daemon's current work finishes. For a **new configuration/parameter pair**, publish
+the parameter file first, then atomically rename the complete configuration into
+place. Orphan parameters do not execute anything; the configuration's arrival
+uses the parameters already present. There is no write-correlation delay.
+See [filesystem-triggered reconciliation](#filesystem-triggered-reconciliation).
+
 ### Read results
 Each configuration has a latest-result file. For `web.yaml`, read:
 
@@ -119,6 +128,8 @@ supported. There is no per-document process fallback.
 file replacement. `go.yaml.in/yaml/v3` provides YAML syntax parsing and embedded
 metadata extraction without modeling DSC resources; JSON uses the standard
 library's `encoding/json`.
+`github.com/fsnotify/fsnotify` (pinned to v1.10.1) supplies directory notifications
+using Linux inotify and Windows ReadDirectoryChangesW.
 
 ## Build and check
 
@@ -335,7 +346,7 @@ exceeding the 30-second shutdown bound exits nonzero.
 | `-config-dir` | Linux `/etc/dsc/config.d`; Windows `%ProgramData%\dsc\config.d` | Existing readable input directory. |
 | `-results-dir` | Linux `/var/lib/dsc/results.d`; Windows `%ProgramData%\dsc\results.d` | Results directory, privately created if absent. |
 | `-dsc-path` | `dsc` | Executable path or name, resolved once at startup through PATH/PATHEXT. |
-| `-interval` | `5m` | Positive delay after each completed reconciliation pass. |
+| `-interval` | `5m` | Positive delay after each completed full reconciliation pass. Targeted work does not reset it. |
 | `-execution-timeout` | `15m` | Positive per-configuration JSON-RPC request timeout. Later documents continue on a fresh server after a timeout. |
 
 Use `-help` for flags. There are no subcommands, daemon configuration files or
@@ -350,8 +361,8 @@ directories, symlinks, `.yml` files, uppercase extensions and temporary suffixes
 such as `.yaml.tmp` are ignored. Go string ordering puts
 `10-a.yaml` before `20-b.yaml`. Each pass rediscovers documents; unchanged files
 are executed with their effective operation because machine state may drift.
-Reconcile immediately on startup, then wait the full interval after each completed
-pass before starting the next.
+Reconcile all configurations immediately on startup, then wait the full interval
+after each completed full pass before starting the next.
 Passes never overlap, and slow passes do not cause catch-up runs.
 
 Each pass normally starts **one short-lived `dsc server`**, initializes its
@@ -383,6 +394,48 @@ together are also invalid, with or without a sidecar. Affected configurations
 receive failed input results and unrelated configurations continue. Orphan
 sidecars are ignored. Missing/unreadable or nonregular selected sidecars fail
 rather than silently falling back to parameter defaults.
+
+### Filesystem-triggered reconciliation
+
+Watching is enabled automatically on Linux and Windows. Creating, modifying, or
+atomically replacing a configuration triggers only that configuration. Creating,
+modifying, or replacing a parameter sidecar triggers its associated configuration
+if present. The same discovery, ambiguity checks, metadata extraction, input
+snapshots, DSC execution, and result publication apply to both targeted and full
+passes. Unrelated configurations are not executed or republished.
+
+The daemon watches the directory, not individual files, so temporary-file rename
+and replacement patterns continue to work. Hidden/temporary names, unsupported
+extensions, unrelated files, and attribute-only changes are ignored. Deletion
+does not trigger an immediate attempt; periodic discovery observes removals.
+Historical results are retained. An orphan sidecar does not wait in a pairing
+queue for a future configuration.
+
+All work is serial, including DSC startup, publication, and session cleanup.
+Targeted work never resets the full-pass timer. If a full pass becomes due while
+targeted work is running, it runs after that work finishes and before more
+targeted attempts. Each targeted dispatch uses a short-lived session; no DSC
+server is retained while waiting. Pending notifications for the same
+configuration coalesce without a debounce delay. A notification during an
+attempt can cause a follow-up; exactly one execution per logical save is not
+guaranteed.
+
+The collector continues draining notifications while DSC is busy. It records
+pending names and uses a nonblocking wake-up signal; watcher failure notification
+also never waits for the scheduler. Watcher errors, overflow, or lost watches
+are logged but do not stop periodic reconciliation. At every scheduled full
+pass, the daemon checks the directory's filesystem identity even if no watcher
+error was reported. It retires stale watches and attempts to establish a fresh
+watch before scanning. Unavailable directories are retried at later full passes,
+without a separate retry timer or parent-directory watch.
+
+For a new pair, publish complete parameters first and then publish the
+configuration. Updating parameters for an **existing** configuration intentionally
+triggers execution immediately; a subsequent configuration update can trigger
+another attempt. This is not an atomic multi-file transaction. Publish via
+temporary-file replacement rather than in-place editing, which can expose
+incomplete input. Periodic full passes still execute unchanged files to correct
+machine drift and recover missed events.
 
 ### Per-configuration metadata
 
@@ -423,8 +476,9 @@ An invalid known value, including null/non-string `operation`, an empty string,
 or unsupported spelling, never falls back to `set`. Malformed JSON/YAML,
 multiple YAML documents, ambiguous keys along the metadata path, or unreadable
 input produces an `input` failure for only that configuration, without invoking
-DSC; later configurations continue. Changes are picked up on the next pass
-without restarting the daemon. Parameter sidecars still work with either format,
+DSC; later configurations continue. Changes trigger targeted reconciliation,
+with periodic full passes as fallback, without restarting the daemon.
+Parameter sidecars still work with either format,
 and `.yml` remains unsupported.
 
 **The companion `.dscd.json` mechanism has been removed.** Move its operation into
@@ -614,13 +668,14 @@ changing existing data permissions. Results are private `0600` files.
 Only trusted administrators should publish documents:
 
 ```sh
-sudo install -m 0600 ./10-example.yaml /etc/dsc/config.d/10-example.yaml
+sudo install -m 0600 ./10-example.yaml /etc/dsc/config.d/.10-example.yaml.tmp
+sudo mv -f /etc/dsc/config.d/.10-example.yaml.tmp /etc/dsc/config.d/10-example.yaml
 ```
 
-The daemon reconciles immediately on startup, then waits five minutes after
-each completed pass. New documents are discovered on the next pass; deploying
-them does **not** require a restart. Adding a document authorizes privileged
-machine changes.
+The daemon performs a full pass immediately on startup and five minutes after
+each completed full pass. Filesystem notifications also trigger targeted
+reconciliation of new or changed inputs; deploying them does **not** require a
+restart. Adding a document authorizes privileged machine changes.
 
 Manage the service:
 
@@ -692,10 +747,12 @@ starts it, and configures restart after five seconds with a one-day failure
 count reset. It creates `%ProgramData%\dsc\config.d` and `results.d` with
 protected access for SYSTEM and Administrators only. Results may contain secrets.
 
-Copy trusted configuration documents and optional parameter sidecars into
+Publish trusted configuration documents and optional parameter sidecars into
 `%ProgramData%\dsc\config.d` as an administrator. No restart is required:
-reconciliation runs immediately at startup and then waits five minutes after
-each completed pass. The MSI uses the default fifteen-minute execution timeout.
+full reconciliation runs immediately at startup and five minutes after each
+completed full pass, with targeted reconciliation on input changes between
+passes. Publish new pairs parameter-first using complete-file replacement.
+The MSI uses the default fifteen-minute execution timeout.
 
 The binary automatically detects SCM operation, accepts Stop and Shutdown, and
 reports lifecycle progress. JSON messages use Event ID 1; inspect their `level`

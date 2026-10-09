@@ -4,7 +4,8 @@
 
 `dsc-reconciler` is a small Go repository. Its executable and service are named
 `dscd`. The daemon periodically discovers local DSC configuration documents,
-invokes DSC, and writes execution results to disk.
+also reconciles changed inputs through a filesystem fast path, invokes DSC,
+and writes execution results to disk.
 
 Linux and Windows are required v1 platforms, including foreground execution,
 systemd and native Windows SCM operation. Keep the core loop shared; use
@@ -76,7 +77,7 @@ or a generic project-layout directory collection. See Go's
 | `cmd/dscd` | Dependency wiring, logging setup, signals, lifecycle, and exit status. |
 | `internal/config` | Typed daemon options, flag parsing, defaults, and validation. |
 | `internal/dsc` | Pass-scoped DSC server processes, MCP initialization, JSON-RPC framing, request timeouts, and execution-result types. |
-| `internal/reconcile` | Discovery, ordering, daemon metadata parsing, input snapshots/hashing, the periodic loop, and coordinating execution with result publication. |
+| `internal/reconcile` | Discovery, ordering, daemon metadata parsing, input snapshots/hashing, periodic and filesystem-triggered scheduling, and coordinating execution with result publication. |
 | `internal/results` | Result serialization, destination naming, permissions, and safe file replacement. |
 
 Keep `main` boring: load config, create the DSC client and result writer, create
@@ -143,6 +144,24 @@ Do not keep DSC alive between passes, introduce an MCP SDK, or interpret resourc
 state. Server sidecars are direct parameter mappings, not CLI-wrapped envelopes;
 the daemon passes them unchanged.
 
+Filesystem watching is a low-latency optimization, not the correctness mechanism.
+Use the same discovery and single-candidate execution path for targeted and full
+passes. Keep all DSC work serial. Watch the directory using fsnotify; do not
+duplicate filename/sidecar rules in the collector. Create/Write events include
+atomic rename destinations; old-name Rename, Remove, and Chmod do not trigger
+immediate reconciliation. New pairs are published parameter-first; orphan
+sidecars do not execute or wait in a pairing queue. Never add a debounce delay.
+Coalesce pending notifications, but retain changes received during execution.
+
+Targeted work does not reset the periodic full-pass timer; due full passes take
+priority after active work finishes. Revalidate the directory identity at every
+full-pass boundary, even without watcher errors; retire stale watches and retry
+registration before discovery. Log watcher failures and preserve periodic
+fallback. Collector notifications must never wait for the scheduler: use
+nonblocking wake-ups and independently stored pending state, and a nonblocking
+failure signal. Keep mutex sections limited to in-memory state changes, never
+I/O, logging, execution, or cleanup. Close and join every owned watcher/collector.
+
 ## Go conventions
 
 - Use short, lowercase package names and clear identifiers. Prefer
@@ -171,7 +190,8 @@ Prefer the standard library: `log/slog`, `context`, `os/exec`, `os`,
 `path/filepath`, `encoding/json`, `time`, `flag`, `os/signal`, and sorting helpers.
 The non-standard dependencies are `golang.org/x/sys` for Windows SCM, Event Log,
 Job Objects, protected ACLs and native replacement, and `go.yaml.in/yaml/v3` for
-embedded metadata extraction. Do not add a general service framework or DSC schema
+embedded metadata extraction, and `github.com/fsnotify/fsnotify` for directory
+notifications on Linux and Windows. Do not add a general service framework or DSC schema
 dependency. Use the Go version declared in `go.mod` and CI.
 
 ## Configuration, logging, and results
@@ -210,8 +230,12 @@ Prioritize observable behavior:
 - Continued processing after a document failure and publication of failure results.
 - Embedded metadata extraction/defaults/validation, mixed operations within a session,
   operation-aware hashes, persisted operation, and successful tests reporting drift.
-- Immediate first reconciliation, a full interval after each completed pass,
-  no catch-up or overlapping passes, and prompt cancellation during the wait.
+- Immediate first reconciliation, a full interval after each completed full pass,
+  targeted work without postponing full passes, no catch-up or overlapping passes,
+  and prompt cancellation during the wait.
+- Targeted configuration/parameter changes, parameter-first publication, atomic
+  replacement, coalescing/in-flight changes, nonblocking collector communication,
+  watcher failure recovery, and periodic directory-identity revalidation.
 - MCP handshake, inline requests and exact input hashes, response IDs and framing,
   session reuse/recovery, bounded shutdown and descendant cleanup.
 - Valid result JSON, filename mapping, complete replacement, publication failures,
@@ -254,7 +278,7 @@ belong in `service-integration.yaml` on disposable runners, called by releases
 or triggered manually. Documentation-only edits need consistency and link checks rather
 than unrelated Go tests.
 
-Keep changes focused and preserve unrelated work. Do not add watchers, Cobra,
+Keep changes focused and preserve unrelated work. Do not add additional watchers, Cobra,
 Viper, a database, generic stores, plugin machinery, nested module management,
 or a large lint stack speculatively. Future commands are not current requirements.
 Keep service-manager details in packaging and avoid platform assumptions in the

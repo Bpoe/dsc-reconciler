@@ -9,7 +9,8 @@ Supported filesystem targets are local Linux filesystems with rename/fsync
 semantics and local NTFS on Windows 11 / Windows Server 2022 or newer. Network
 shares, FAT, macOS, and hostile local producers are outside the v1 contract.
 
-The core design is a periodic, serial loop over local documents, with DSC owning
+The core design is a periodic, serial loop over local documents with a
+filesystem-triggered targeted fast path, with DSC owning
 resource execution and the daemon publishing results safely. The concrete
 defaults, discovery rules, and JSON envelope below establish an initial
 specification. They can evolve deliberately with corresponding tests and
@@ -55,7 +56,7 @@ The repository layout and coding rules are in [AGENTS.md](../AGENTS.md).
 | --- | --- | --- |
 | Daemon entry point | Load options, configure logging, connect components, establish cancellation, report process exit. | No discovery or DSC outcome logic. |
 | Configuration loader | Typed daemon options and validation. | No DSC document parsing. |
-| Reconciliation loop | Discover and sort documents; extract embedded daemon metadata; coordinate periodic execution and publication. | No DSC resource-schema interpretation, process construction or file replacement mechanics. |
+| Reconciliation loop | Discover and sort documents; extract embedded daemon metadata; coordinate periodic and filesystem-triggered serial execution and publication. | No DSC resource-schema interpretation, process construction or file replacement mechanics. |
 | DSC client | Own pass-scoped DSC servers, MCP initialization and serial JSON-RPC requests; produce execution results. | No discovery, input reads/hashing or result-file writes. |
 | Result writer | Encode the result contract and publish files safely. | No DSC invocation or resource-state interpretation. |
 
@@ -75,7 +76,7 @@ The initial configuration uses the standard `flag` package:
 | `--version` | `Version` | `false` | Print `dscd <version>` to stdout and exit without daemon startup. |
 | `-config-dir` | `ConfigDir` | Linux: `/etc/dsc/config.d`; Windows: `%ProgramData%\dsc\config.d` | Directory containing DSC documents. |
 | `-results-dir` | `ResultsDir` | Linux: `/var/lib/dsc/results.d`; Windows: `%ProgramData%\dsc\results.d` | Directory containing latest execution results. |
-| `-interval` | `Interval` | `5m` | Delay after each completed reconciliation pass; must be positive. |
+| `-interval` | `Interval` | `5m` | Delay after each completed full reconciliation pass; must be positive. Targeted work does not reset it. |
 | `-dsc-path` | `DSCPath` | `dsc` | Executable path or name to resolve at startup using PATH (and PATHEXT on Windows). |
 | `-execution-timeout` | `ExecutionTimeout` | `15m` | Positive maximum duration of each configuration JSON-RPC request. |
 
@@ -164,9 +165,10 @@ sequentially. Empty passes, or passes with only invalid/unreadable inputs, start
 server. The session is always closed before the pass returns. DSC is never kept
 running while `dscd` waits between passes.
 
-Reconcile immediately on startup. After each pass completes, including all result
+Reconcile all configurations immediately on startup. After each full pass completes, including all result
 publication attempts and server shutdown, wait the full configured interval before starting the next
-pass. Pass-level failures use the same delay before retrying. Slow passes never
+full pass. Targeted work can run during this interval but never resets its timer.
+Pass-level failures use the same delay before retrying. Slow passes never
 cause catch-up runs: a 12-minute pass with a five-minute interval starts its next
 pass 17 minutes after the previous start. There is exactly one active pass and
 one DSC invocation at a time within a daemon instance. Cancellation interrupts
@@ -174,13 +176,19 @@ the wait and prevents further passes.
 
 ```text
 validate startup
+register directory watch (failure is nonfatal)
 run one pass immediately:
     discover and sort configurations
     capture each input, start server if needed, submit sequentially, publish results
     close the server
-until canceled:
-    wait the full interval after pass completion, or stop on cancellation
-    if not canceled: run one pass
+until canceled, serially:
+    if full pass is due:
+        revalidate directory identity and restore watch if needed
+        run full pass; reset interval after completion
+    else if input notifications are pending:
+        discover affected configuration; execute and publish; close server
+    else:
+        wait for cancellation, full-pass timer, watcher failure, or input notification
 ```
 
 For every attempted document, obtain an execution result, then attempt to
@@ -188,7 +196,7 @@ publish it before moving to the next document. An execution error does not skip
 publication. A publication error is logged separately and does not suppress
 attempts on later documents. Cancellation stops new attempts.
 
-Every pass rediscovers inputs. File changes are considered on subsequent passes;
+Every pass rediscovers inputs. File changes also trigger targeted reconciliation;
 the daemon does not cache a permanent document list or skip unchanged documents,
 because machine state may drift even when a file has not changed.
 
@@ -196,6 +204,85 @@ Removal stops future attempts and does not undo machine changes. Existing result
 files remain until a producer or operator removes them. They are historical
 evidence of a last attempt, not proof that the corresponding input still exists.
 Renaming a document creates a new identity and leaves the old result behind.
+
+### Filesystem-triggered reconciliation
+
+Filesystem watching is enabled by default and is only a low-latency optimization.
+Periodic full passes remain the correctness mechanism for missed notifications,
+watcher failures, and machine drift. There is no watcher flag or write-correlation
+delay. Targeted work uses the same per-configuration attempt operation as full
+passes: destination validation, input capture, metadata parsing, hashing, DSC
+invocation, logging, and publication are not duplicated.
+
+`github.com/fsnotify/fsnotify` v1.10.1 watches `ConfigDir` nonrecursively using
+inotify on Linux and ReadDirectoryChangesW on Windows. Watch the directory rather
+than individual files. Its Create and Write event bits are eligible triggers;
+rename destinations are reported as Create, so temporary-file publication and
+atomic replacement work. Old-name Rename, Remove, and attribute-only Chmod
+events do not trigger input execution. Root-directory removal/rename is handled
+as watch loss instead.
+
+Reuse discovery's exact case-sensitive naming, configuration eligibility, and
+sidecar association rules. Rediscover current inputs and select only the affected
+basename; scanning directory entries is acceptable, but unrelated configurations
+must not be read, executed, or republished. Ambiguous configuration basenames
+produce input failures for every affected configuration, and ambiguous sidecars
+retain their existing failure semantics. A changed configuration that has
+disappeared or become an ignored entry is not attempted; an existing selected
+sidecar that is unreadable/nonregular still produces an input failure. Pending
+notifications for a sidecar already removed do not authorize a default-parameter
+attempt.
+
+Creating/modifying a sidecar without an associated configuration selects no work.
+Do not retain it in a pairing queue. To publish a **new** pair, publish complete
+parameters first and then atomically create/rename the configuration into place.
+The configuration's arrival selects its already-present parameters. For an
+existing configuration, updating its parameters intentionally triggers an
+immediate attempt; a later configuration update can trigger another. This is
+not an atomic multi-file transaction. In-place modifications are observed but
+can expose incomplete input; trusted producers should use temporary replacement.
+
+One collector drains filesystem events independently of the serial scheduler.
+It uses shared naming helpers to insert affected names into a deduplicated
+pending set and performs no directory scans, input reads, DSC calls, logging, or
+publication. Changes use a capacity-one nonblocking wake-up signal; the pending
+set remains authoritative if a wake-up coalesces. Watcher failure is stored
+before closing a completion channel, which is also nonblocking and remains
+observable until the scheduler handles it. Thus neither changes nor errors wait
+for the scheduler to receive a message.
+
+Shared-state mutexes protect only in-memory state transfer. Never hold them
+across filesystem access, sorting, logging, DSC execution, publication, watcher
+Close, or goroutine joins. The scheduler takes finite, sorted batches, merges
+notifications for a key before dispatch, and leaves notifications arriving
+during an attempt pending for a follow-up. There is no debounce or hash-based
+skip; exactly-once execution per logical save is not guaranteed.
+
+Full passes and targeted dispatches never overlap, including session startup,
+publication, and cleanup. Each targeted dispatch handles one affected basename
+and closes its short-lived session before returning. A due full pass takes
+priority over additional targeted work after the active attempt finishes.
+Targeted work never resets the periodic timer. Full passes alone reset it after
+completion, with no fixed-rate catch-up behavior.
+
+Register the watch before initial discovery. Capture directory identity through
+short-lived handles before and after watch registration and reject a mismatch.
+Before **every scheduled full pass**, inspect the current directory and compare
+filesystem identity with the registered identity, even if no watcher error or
+root rename was reported. Path equality or timestamps are not an identity test.
+Close identity handles promptly so they do not prevent Windows replacement.
+
+Setup failure, overflow, closed channels, root-watch loss, identity mismatch, or
+an uninspectable directory is logged and does not terminate the daemon. Retire
+the stale watcher and attempt registration at the next full-pass boundary; an
+identity mismatch found at that boundary permits fresh registration immediately
+before discovery. If the directory is still unavailable, the full-pass attempt
+retains its normal failure behavior and registration is retried at the following
+boundary. No rapid retry timer, recursive watch, or parent-directory watch is
+added. Pending names are only hints and resolve against the current configured
+directory. This supplies eventual recovery after silent root replacement, not
+instantaneous recovery of the fast path. Cancellation closes the watcher and
+joins the collector without waiting for a scheduler acknowledgment.
 
 ### Per-configuration metadata
 
@@ -248,7 +335,7 @@ The equivalent `web.json` configuration is:
 **Omitted embedded operation means `set`. Placing a configuration in the input directory
 normally authorizes DSC to enforce its desired state.** Producers opting into
 audit-only behavior must include the metadata in the published document. Removing
-metadata restores `set` on the next pass. Operation changes require no restart.
+metadata restores `set` on the next targeted or full attempt. Operation changes require no restart.
 Either configuration format can still use either parameter-sidecar format.
 
 The document root, `metadata` and `metadata.dscd` must be objects when present,
@@ -515,6 +602,7 @@ The next scheduled attempt is the normal retry opportunity.
 | --- | --- |
 | Invalid options, unreadable input directory, unusable results directory, or missing executable at startup | Log clearly and exit nonzero. |
 | Input-directory scan fails after startup | Log the failed pass and retry on the next interval. |
+| Watcher setup/runtime failure, lost watch, or changed/unavailable directory identity | Log, preserve periodic full passes, and retry watch registration at full-pass boundaries. |
 | A document cannot be read or DSC fails | Publish a failed attempt and continue to later documents. |
 | DSC returns unusable RPC output or reports errors | Publish a failed attempt; restart only an unusable session. |
 | Server startup/initialization fails | Publish remaining input failures as described above, log a pass-level error, retry next pass. |
@@ -598,8 +686,9 @@ Retain DSC on DNF removal with `--noautoremove` if it was dependency-installed.
 Image construction without running systemd skips runtime service operations
 while recording enablement for the image.
 Publish trusted documents into the input directory; a restart is not needed.
-The first pass is immediate and the default wait after each completed pass is
-five minutes. Use systemd drop-ins for local service customizations rather than
+The first full pass is immediate and the default wait after each completed full
+pass is five minutes. Filesystem changes trigger targeted work between full
+passes. Use systemd drop-ins for local service customizations rather than
 editing the package-owned unit.
 
 The service manager handles restarts and final process cleanup. Provision one
@@ -673,8 +762,9 @@ Native service tables own `dscd`, display name `DSC Reconciliation Daemon`,
 automatic startup and LocalSystem identity. The command line supplies only
 `-config-dir` and `-results-dir`; the daemon's default `dsc` name, five-minute
 interval and fifteen-minute execution timeout remain authoritative.
-Reconciliation starts immediately, then waits five minutes after each completed
-pass. Deploying trusted configurations does not require a service restart.
+Full reconciliation starts immediately, then waits five minutes after each
+completed full pass, with targeted reconciliation on input changes between
+passes. Deploying trusted configurations does not require a service restart.
 Service recovery restarts after five seconds and resets its failure count after
 one day. WiX's rollback-aware Util service configuration sets recovery actions;
 the native MSI service configuration sets recovery for nonzero service exits
@@ -758,10 +848,11 @@ whole-process memory quota. These fixed limits avoid extra operator flags.
 
 Implement the typed config, DSC process boundary, and result writer first. Add a
 testable single pass and then the periodic lifecycle. Wire them in `cmd/dscd`,
-then add packaging and operator documentation. Keep the initial dependency set
-limited to the Go standard library plus `golang.org/x/sys`, justified by native
-Windows SCM, Event Log, process jobs, ACLs and replacement APIs. OS file suffixes
-isolate these details; core reconciliation does not branch on operating system.
+then add packaging and operator documentation. Keep dependencies small:
+`golang.org/x/sys` supplies native Windows SCM, Event Log, process jobs, ACLs and
+replacement APIs; `go.yaml.in/yaml/v3` handles embedded metadata; fsnotify supplies
+cross-platform directory notifications. OS file suffixes isolate native details;
+core reconciliation does not branch on operating system.
 
 Tests use temporary directories, small fakes defined against the consumer's
 interfaces, and controlled helper processes. Cover sorted discovery, ignored
@@ -770,6 +861,15 @@ non-overlap, stdout/stderr separation, result classification, JSON compatibility
 filename collisions, failed publication, and complete replacement visibility.
 Tests must not require DSC or mutate the host's desired state. Real-DSC tests are
 opt-in and must run only in a disposable, explicitly configured environment.
+
+Watcher tests use fake event sources and `testing/synctest` for exact routing,
+coalescing, non-overlap, full-pass scheduling, and watcher recovery assertions.
+Block execution/publication/cleanup to verify collectors continue consuming
+events and reporting failures without scheduler-dependent backpressure. Suppress
+root events to test periodic directory-identity recovery. Native tests exercise
+creation, modification, and atomic publication of configurations and sidecars on
+both Linux and Windows using fake DSC and temporary files. Synchronize with
+channels/readiness, not arbitrary sleeps; do not assume exactly-once OS events.
 
 Use the build, test, vet, formatting, and race checks specified in
 [AGENTS.md](../AGENTS.md). `ci.yaml` runs these checks natively on Linux and Windows
