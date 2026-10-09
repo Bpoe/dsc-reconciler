@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -12,6 +14,11 @@ import (
 )
 
 func startProcess(cmd *exec.Cmd) (func() error, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("locate daemon executable: %w", err)
+	}
+	cmd.Env = bundledEnvironment(cmd.Path, executable, cmd.Environ())
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create process job: %w", err)
@@ -40,6 +47,45 @@ func startProcess(cmd *exec.Cmd) (func() error, error) {
 		return nil, errors.Join(err, killErr, waitErr, windows.CloseHandle(job))
 	}
 	return func() error { return windows.CloseHandle(job) }, nil
+}
+
+func bundledEnvironment(path, executable string, environment []string) []string {
+	bundle := filepath.Join(filepath.Dir(executable), "dsc")
+	if !strings.EqualFold(filepath.Clean(path), filepath.Join(bundle, "dsc.exe")) {
+		return environment
+	}
+	// Honor DSC's explicit isolation mode rather than broadening its search.
+	for _, entry := range environment {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.EqualFold(key, "DSC_RESTRICTED_PATH") {
+			return environment
+		}
+	}
+	child := append([]string(nil), environment...)
+	hasPath := false
+	for i, entry := range child {
+		key, value, _ := strings.Cut(entry, "=")
+		switch {
+		case strings.EqualFold(key, "PATH"):
+			child[i] = key + "=" + bundle
+			if value != "" {
+				child[i] += ";" + value
+			}
+			hasPath = true
+		case strings.EqualFold(key, "DSC_RESOURCE_PATH"):
+			// DSC_RESOURCE_PATH replaces manifest discovery through PATH.
+			// Retain custom locations and their priority, then add our bundle.
+			child[i] = key + "="
+			if value != "" {
+				child[i] += value + ";"
+			}
+			child[i] += bundle
+		}
+	}
+	if !hasPath {
+		child = append(child, "PATH="+bundle)
+	}
+	return child
 }
 
 func assignAndResume(job windows.Handle, pid uint32) error {

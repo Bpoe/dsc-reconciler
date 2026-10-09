@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string] $BinaryPath,
-    [Parameter(Mandatory)][string] $DSCPath,
+    [string] $DSCPath,
     [string] $ConfigDir = "$env:ProgramData\dsc\config.d",
     [string] $ResultsDir = "$env:ProgramData\dsc\results.d"
 )
@@ -12,18 +12,20 @@ if (Get-Service -Name dscd -ErrorAction SilentlyContinue) {
     throw 'The dscd service already exists. Stop and remove it before reinstalling.'
 }
 $BinaryPath = (Resolve-Path -LiteralPath $BinaryPath).Path
-$DSCPath = (Resolve-Path -LiteralPath $DSCPath).Path
+if ($DSCPath) {
+    $DSCPath = (Resolve-Path -LiteralPath $DSCPath).Path
+}
 $ConfigDir = [IO.Path]::GetFullPath($ConfigDir)
 $ResultsDir = [IO.Path]::GetFullPath($ResultsDir)
-foreach ($path in @($BinaryPath, $DSCPath, $ConfigDir, $ResultsDir)) {
+foreach ($path in @($BinaryPath, $ConfigDir, $ResultsDir) + @($DSCPath | Where-Object { $_ })) {
     if ($path.Contains('"')) {
         throw 'Paths must not contain double quotes.'
     }
 }
 
 if (-not (Test-Path -LiteralPath $BinaryPath -PathType Leaf) -or
-    -not (Test-Path -LiteralPath $DSCPath -PathType Leaf)) {
-    throw 'BinaryPath and DSCPath must name executable files.'
+    ($DSCPath -and -not (Test-Path -LiteralPath $DSCPath -PathType Leaf))) {
+    throw 'BinaryPath and any explicit DSCPath must name executable files.'
 }
 
 foreach ($directory in @($ConfigDir, $ResultsDir)) {
@@ -49,8 +51,11 @@ function Quote-Path([string] $Value) {
     return '"' + ($Value -replace '(\\+)$', '$1$1') + '"'
 }
 
-$command = '{0} -config-dir {1} -results-dir {2} -dsc-path {3} -interval 5m -execution-timeout 15m' -f `
-    (Quote-Path $BinaryPath), (Quote-Path $ConfigDir), (Quote-Path $ResultsDir), (Quote-Path $DSCPath)
+$command = '{0} -config-dir {1} -results-dir {2} -interval 5m -execution-timeout 15m' -f `
+    (Quote-Path $BinaryPath), (Quote-Path $ConfigDir), (Quote-Path $ResultsDir)
+if ($DSCPath) {
+    $command += ' -dsc-path ' + (Quote-Path $DSCPath)
+}
 New-Service -Name dscd -DisplayName 'DSC reconciliation daemon' -BinaryPathName $command -StartupType Automatic `
     -Description 'Periodically applies local DSC documents and publishes their latest results.' | Out-Null
 & sc.exe failure dscd reset= 86400 actions= restart/5000/restart/5000/restart/5000 | Out-Null

@@ -263,12 +263,13 @@ core packages.
 Windows release packaging uses the native x64 WiX project under
 `packaging/windows/msi`. Keep WiX pinned, the UpgradeCode stable, and the
 documented release-tag-to-MSI version mapping ordered and collision-free.
-The MSI accepts a prebuilt executable and relies on Microsoft DSC 3.3.0+ installed
-separately, with `dsc.exe` on the machine/system PATH visible to LocalSystem before
-service startup. User PATH and per-user executable aliases are insufficient;
-system PATH changes may require a reboot before services see them. Do not add
-DSC executable properties, discovery, validation, persistence or PATH modification
-to the MSI. The service uses the daemon's default `dsc` executable name.
+The MSI accepts a prebuilt executable and complete staged Microsoft DSC distribution.
+The Windows builder downloads the pinned official DSC 3.3.0 x64 ZIP once,
+verifies its pinned SHA-256 and shares the temporary payload with MSI and ZIP.
+Preserve every upstream file and license. The daemon defaults to adjacent
+`dsc\dsc.exe` on Windows, then PATH; explicit `-dsc-path` always takes precedence.
+Do not add DSC executable properties, external-installation discovery, persistence
+or machine/user PATH modification to the MSI.
 The MSI owns service/Event Log registration declaratively; never invoke the manual
 PowerShell installers from an MSI. Protect both ProgramData directories for
 SYSTEM and Administrators and preserve them and user data on uninstall.
@@ -277,7 +278,7 @@ Windows SDK build dependency is needed. Keep `build.ps1` focused on version
 mapping and `dotnet build`; run `inspect.ps1` separately in every packaging workflow.
 Build/inspect MSI tables in native Windows CI and release jobs; installation
 tests belong only in the reusable/manual service-integration workflow on disposable
-runners. No DSC bundling, per-user PATH discovery, migration logic or ARM64
+runners. No install-time DSC download, per-user PATH discovery, migration logic or ARM64
 packaging. See [the packaging contract](docs/design.md#windows-msi).
 
 Linux AMD64 DEB/RPM packages share nFPM metadata under `packaging/linux` and the

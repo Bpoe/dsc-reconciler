@@ -4,22 +4,23 @@
            Version="$(var.ProductVersion)" UpgradeCode="{536AF323-17B1-40ED-870C-751F063452AA}"
            Scope="perMachine" InstallerVersion="500" Language="1033">
     <SummaryInformation Description="dscd $(var.ReleaseVersion) Windows x64 installer" />
+    <!-- Remove the old product inside the transaction before installing files.
+         DSC's unversioned resource/manifests must be replaced without changing
+         upstream bytes or depending on late-upgrade file timestamp rules. -->
     <MajorUpgrade DowngradeErrorMessage="A newer version of dscd is already installed."
-                  Schedule="afterInstallExecute" />
+                  Schedule="afterInstallInitialize" />
     <MediaTemplate EmbedCab="yes" />
     <Property Id="ARPCOMMENTS" Value="dscd $(var.ReleaseVersion)" />
     <Property Id="ARPNOMODIFY" Value="1" />
-    <!-- Install DSC separately on the machine PATH visible to LocalSystem.
-         dscd resolves its default executable name, dsc, at service startup. -->
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="dscd">
+        <Directory Id="DSCFOLDER" Name="dsc" />
         <Component Id="Daemon" Guid="{2F1D5691-B568-458F-973A-65B0E966EC2C}" Bitness="always64">
           <CreateFolder>
             <PermissionEx Sddl="O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)" />
           </CreateFolder>
-          <!-- Go's PE has no version resource; supply the release version so
-               late major upgrades always replace the previous executable.
+          <!-- Go's PE has no version resource; supply the release version.
                Language 0 is neutral and satisfies ICE60 for this file row. -->
           <File Id="DaemonFile" Source="$(var.BinaryPath)" Name="dscd.exe" KeyPath="yes"
                 DefaultVersion="$(var.ProductVersion).0" DefaultLanguage="0" />
@@ -43,8 +44,7 @@
                                 ThirdFailureActionType="restart" ResetPeriodInDays="1"
                                 RestartServiceDelayInSeconds="5" />
           </ServiceInstall>
-          <!-- Recreate registration on install/repair so changed service
-               arguments take effect even with a late major upgrade. -->
+          <!-- Recreate registration on install/repair. -->
           <ServiceControl Id="DaemonControl" Name="dscd" Start="install" Stop="both"
                           Remove="both" Wait="yes" />
         </Component>
@@ -90,6 +90,7 @@
       </Directory>
     </StandardDirectory>
     <Feature Id="Complete" Title="dscd" Level="1">
+      <ComponentGroupRef Id="BundledDSC" />
       <ComponentRef Id="Daemon" />
       <ComponentRef Id="License" />
       <ComponentRef Id="EventSource" />
@@ -98,4 +99,9 @@
       <ComponentRef Id="ResultsDirectory" />
     </Feature>
   </Package>
+  <Fragment>
+    <ComponentGroup Id="BundledDSC" Directory="DSCFOLDER">
+      <Files Include="$(var.DSCDirectory)\**" />
+    </ComponentGroup>
+  </Fragment>
 </Wix>

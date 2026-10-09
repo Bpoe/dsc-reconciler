@@ -21,12 +21,31 @@ $docs = Join-Path $package 'docs'
 $windows = Join-Path $package 'packaging\windows'
 $msiOutput = Join-Path $stage 'msi'
 $binary = Join-Path $bin 'dscd.exe'
+$dscDirectory = Join-Path $bin 'dsc'
 $originalCGO = $env:CGO_ENABLED
 $originalOS = $env:GOOS
 $originalArch = $env:GOARCH
 Push-Location (Join-Path $PSScriptRoot '..\..')
 try {
     New-Item -ItemType Directory -Path $bin, $docs, $windows, $output -Force | Out-Null
+    $dscArchive = Join-Path $stage 'DSC-3.3.0-x86_64-pc-windows-msvc.zip'
+    Invoke-WebRequest -Uri 'https://github.com/PowerShell/DSC/releases/download/v3.3.0/DSC-3.3.0-x86_64-pc-windows-msvc.zip' `
+        -OutFile $dscArchive
+    $expectedDSCHash = '3f8b27f648661903d066cc19d5a6e7a8c13bd07eb738d4d765ce7239619b8b5f'
+    if ((Get-FileHash -LiteralPath $dscArchive -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedDSCHash) {
+        throw 'DSC 3.3.0 archive SHA256 mismatch.'
+    }
+    Expand-Archive -LiteralPath $dscArchive -DestinationPath $dscDirectory
+    # The release archive contains NOTICE.txt but omits the upstream MIT license.
+    $dscLicense = Join-Path $dscDirectory 'LICENSE'
+    Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/PowerShell/DSC/v3.3.0/LICENSE' -OutFile $dscLicense
+    $expectedDSCLicenseHash = '7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744'
+    if ((Get-FileHash -LiteralPath $dscLicense -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedDSCLicenseHash) {
+        throw 'DSC 3.3.0 LICENSE SHA256 mismatch.'
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $dscDirectory 'dsc.exe') -PathType Leaf)) {
+        throw 'DSC archive must contain dsc.exe at its root.'
+    }
     $env:CGO_ENABLED = '0'
     $env:GOOS = 'windows'
     $env:GOARCH = 'amd64'
@@ -50,7 +69,8 @@ try {
     Copy-Item packaging\windows\install.ps1, packaging\windows\uninstall.ps1, packaging\windows\test-service.ps1 `
         -Destination $windows
     Compress-Archive -LiteralPath $package -DestinationPath (Join-Path $output "$name.zip") -Force
-    & "$PSScriptRoot\msi\build.ps1" -Version $Version -BinaryPath $binary -OutputDirectory $msiOutput
+    & "$PSScriptRoot\msi\build.ps1" -Version $Version -BinaryPath $binary `
+        -DSCDirectory $dscDirectory -OutputDirectory $msiOutput
     Copy-Item -LiteralPath (Join-Path $msiOutput "$name.msi") -Destination $output
     @("$name.zip", "$name.msi") | ForEach-Object {
         $hash = (Get-FileHash -LiteralPath (Join-Path $output $_) -Algorithm SHA256).Hash.ToLowerInvariant()
