@@ -6,11 +6,10 @@ cd "$(dirname "$0")/../.."
 [[ $# -eq 1 ]] || { echo "Usage: VERSION=vX.Y.Z bash $0 OUTPUT_DIR" >&2; exit 1; }
 output=$(realpath "$1")
 version=${VERSION#v}
-version=${version/-rc./~rc.}
+[[ $VERSION =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
 deb="$output/dscd_${version}_amd64.deb"
 rpm="$output/dscd-${version}-1.x86_64.rpm"
-[[ $(basename "$deb") == "dscd_${version}_amd64.deb" ]]
-[[ $(basename "$rpm") == "dscd-${version}-1.x86_64.rpm" ]]
+archive="$output/dscd-$VERSION-linux-amd64.tar.gz"
 [[ $(dpkg-deb -f "$deb" Package) == dscd ]]
 [[ $(dpkg-deb -f "$deb" Version) == "$version" ]]
 [[ $(dpkg-deb -f "$deb" Architecture) == amd64 ]]
@@ -22,6 +21,12 @@ rpm --checksig "$rpm"
 stage="$(dirname "$deb")/.verify"
 mkdir "$stage"
 trap 'rm -rf "$stage"' EXIT
+tar -xzf "$archive" -C "$stage"
+archive_root="$stage/dscd-$VERSION-linux-amd64"
+[[ $("$archive_root/bin/dscd" --version) == "dscd $VERSION" ]]
+for file in README.md LICENSE AGENTS.md docs/design.md packaging/systemd/dscd.service; do
+    cmp "$file" "$archive_root/$file"
+done
 dpkg-deb --extract "$deb" "$stage/deb"
 mkdir "$stage/rpm"
 rpm2archive -n < "$rpm" > "$stage/rpm.tar"
@@ -29,6 +34,7 @@ tar -xf "$stage/rpm.tar" -C "$stage/rpm"
 for format in deb rpm; do
     root="$stage/$format"
     [[ $(stat -c %a "$root/usr/bin/dscd") == 755 ]]
+    cmp "$archive_root/bin/dscd" "$root/usr/bin/dscd"
     [[ $(stat -c %a "$root/usr/lib/systemd/system/dscd.service") == 644 ]]
     cmp packaging/systemd/dscd.service "$root/usr/lib/systemd/system/dscd.service"
     cmp LICENSE "$root/usr/share/licenses/dscd/LICENSE"
@@ -44,6 +50,4 @@ done
 dpkg-deb --contents "$deb" | awk '$2 != "root/root" { bad=1 } END { exit bad }'
 rpm -qp --qf '[%{FILEUSERNAME} %{FILEGROUPNAME}\n]' "$rpm" |
     awk '$0 != "root root" { bad=1 } END { exit bad }'
-dpkg --compare-versions 0.0.1~rc.1 lt 0.0.1
-[[ $(rpm --eval '%{lua:print(rpm.vercmp("0.0.1~rc.1", "0.0.1"))}') == -1 ]]
-echo "Package metadata, payloads, units and prerelease ordering verified."
+echo "Archive, package metadata, identical executable payloads and units verified."

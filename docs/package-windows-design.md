@@ -1,3 +1,7 @@
+> Historical implementation brief. Its release workflow and RC requirements are
+> superseded by the [current MSI contract](design.md#windows-msi)
+> and [release instructions](../README.md#releases).
+
 Implement a native Windows MSI installer for the dsc-reconciler project using WiX Toolset.
 
 The goal is to make installing dscd on Windows as simple as installing any other native Windows service.

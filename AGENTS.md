@@ -238,6 +238,7 @@ implementation details, a mocking framework, or an arbitrary coverage quota.
 For Go changes, run these commands from the module root:
 
 ```sh
+go mod verify
 go build ./...
 go test ./...
 go vet ./...
@@ -249,8 +250,8 @@ formatting check lists files; `gofmt -l` alone does not return a failure status 
 unformatted files. Run `go test -race ./...` for concurrency or shared-state
 changes on a supported environment. Keep Makefile targets and CI aligned with
 these commands. Keep normal Go checks in `ci.yaml`; service installation checks
-belong in the manually triggered `service-integration.yaml` workflow on disposable
-runners. Documentation-only edits need consistency and link checks rather
+belong in `service-integration.yaml` on disposable runners, called by releases
+or triggered manually. Documentation-only edits need consistency and link checks rather
 than unrelated Go tests.
 
 Keep changes focused and preserve unrelated work. Do not add watchers, Cobra,
@@ -275,13 +276,14 @@ Build with the pinned WiX .NET SDK; no native helper, Visual C++ toolchain or
 Windows SDK build dependency is needed. Keep `build.ps1` focused on version
 mapping and `dotnet build`; run `inspect.ps1` separately in every packaging workflow.
 Build/inspect MSI tables in native Windows CI and release jobs; installation
-tests belong only in the manual service-integration workflow on disposable
+tests belong only in the reusable/manual service-integration workflow on disposable
 runners. No DSC bundling, per-user PATH discovery, migration logic or ARM64
 packaging. See [the packaging contract](docs/design.md#windows-msi).
 
 Linux AMD64 DEB/RPM packages share nFPM metadata under `packaging/linux` and the
 unit in `packaging/systemd`. Pin nFPM in workflows; do not add it to `go.mod`.
-Use the release tag for package versions, with prereleases sorting before stable.
+Use stable `vX.Y.Z` release tags for package versions. RC tags are unsupported;
+preserve the existing stable MSI mapping rather than renumbering versions.
 Declare Microsoft `dsc >= 3.3.0` as a package dependency; never bundle or download
 DSC in maintainer scripts or configure its repositories. Package-managed binaries
 use `/usr/bin` and the vendor unit directory is `/usr/lib/systemd/system`.
@@ -291,6 +293,12 @@ separate from opt-in installation tests on disposable machines; only a running
 systemd environment validates service startup.
 
 Update `docs/design.md` and relevant tests when changing behavior or contracts.
+Keep release orchestration simple: the existing three workflows, shared platform
+packaging scripts, and native Actions artifacts. Release integration must test
+the exact uploaded packages before draft creation. Do not add a release library,
+custom artifact manifests, or automatic upgrade-baseline discovery. Upgrade
+scripts remain available for explicitly supplied packages; automated release
+gates currently cover fresh installations, not upgrades.
 Update the README and packaging when changing operator-facing options. Inspect
 the final diff for scope creep. Report what changed, which checks ran, and any
 unverified behavior. Never claim a check passed if it was not run.

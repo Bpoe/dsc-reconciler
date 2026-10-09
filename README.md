@@ -125,6 +125,7 @@ library's `encoding/json`.
 From the module root, on either platform:
 
 ```text
+go mod verify
 go build ./...
 go test ./...
 go vet ./...
@@ -156,18 +157,20 @@ if ($LASTEXITCODE -ne 0 -or $unformatted.Count) { throw 'Formatting check failed
 ```
 
 To embed a version in a source build, add
-`-ldflags "-X main.version=v0.0.2"` to `go build`. Release archive builds and the
-Linux package build script stamp the release tag automatically; the release MSI
-uses the same stamped executable as the Windows archive.
+`-ldflags "-X main.version=v0.0.2"` to `go build`. Both platform packaging scripts
+stamp the version automatically and build one executable for that platform's
+archive and native packages.
 
 Normal tests use temporary files, fakes and controlled helper executables, not
 DSC. They do not install services or change machine configuration.
-[CI](.github/workflows/ci.yaml) runs native build/test/vet/format/race checks on
-both OSes for pushes and pull requests, plus Linux package build/inspection
-without installation. Service smoke tests run separately on
-disposable runners through the manual
-[service-integration workflow](.github/workflows/service-integration.yaml):
-in GitHub, select **Actions > service-integration > Run workflow**.
+[CI](.github/workflows/ci.yaml) runs module verification and native
+build/test/vet/format/race checks on both OSes for branch pushes and pull requests,
+plus Windows MSI and Linux package build/inspection without installation.
+Release workflows call this same CI before mandatory installation tests.
+To run those tests independently on disposable runners, select
+**Actions > service-integration > Run workflow**, choose a branch, and enter a
+test-only stable version such as `v0.0.3`. This builds that ref with the shared
+packaging scripts; it does not create a tag or release.
 `packaging\windows\test-service.ps1` is a separate, **administrator-only,
 opt-in** SCM integration check; never run it on a production machine.
 
@@ -191,35 +194,74 @@ and ensure `dpkg-deb`, `rpm`, `rpm2archive` and `systemd-analyze` are available
 ```sh
 go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
 # Ensure Go's bin directory is on PATH.
-VERSION=v0.0.1-rc.1 bash packaging/linux/build.sh dist
-VERSION=v0.0.1-rc.1 bash packaging/linux/validate.sh dist
+VERSION=v0.0.3 bash packaging/linux/build.sh dist
+VERSION=v0.0.3 bash packaging/linux/validate.sh dist
 ```
 
-Validation extracts packages without installing them. The manual integration
-workflow additionally tests DEB lifecycle with real systemd on Ubuntu and RPM
-lifecycle in a Fedora image without systemd; the latter is not service-startup
-validation. Installation smoke tests are destructive and disposable-only.
+The builder produces TAR.GZ, DEB, RPM and checksums. Validation extracts packages
+without installing them and checks that they contain the archive's executable.
 
-## Release candidates
+### Build Windows packages
 
-The manual [release workflow](.github/workflows/release.yaml) creates a **draft
-pre-release**, initially `v0.0.1-rc.1`. In GitHub, select **Actions > release >
-Run workflow**, choose the source branch, and enter a new
-`vX.Y.Z-rc.N` or `vX.Y.Z` tag. Use a revision that has passed CI and review the separate
-service-integration results before publishing.
+On native Windows with Go, PowerShell 7 and the .NET SDK:
 
-The workflow tests and vets the selected revision on native Linux and Windows
-amd64 runners, checks formatting and module integrity, then builds binaries
-without a C runtime dependency. It does not run real DSC or install services;
-race checks remain in the normal CI workflow.
+```powershell
+.\packaging\windows\build.ps1 -Version v0.0.3 -OutputDirectory .\dist
+.\packaging\windows\msi\inspect.ps1 -Version v0.0.3 -MsiPath .\dist\dscd-v0.0.3-windows-amd64.msi
+```
+
+The builder produces ZIP, MSI and checksums without installing the service.
+WiX is pinned in its project; its native ICE validation must be permitted by
+the build machine's policy. Make is not required.
+
+## Releases
+
+Push a new stable `vX.Y.Z` tag on a reviewed commit already in `main`:
+
+```sh
+git fetch origin
+git tag v0.0.3 <reviewed-commit>
+git push origin refs/tags/v0.0.3
+```
+
+The [release workflow](.github/workflows/release.yaml) derives the version from
+the tag and checks out its exact commit. It rejects unsupported versions,
+commits outside `main`, and existing releases (including drafts). RC tags are
+not supported. MSI limits are major/minor 0..255 and patch 0..654; the existing
+stable mapping `M.m.(100*p+99)` is unchanged.
+
+Release calls CI for native checks, race tests, and package inspection, then
+calls [service integration](.github/workflows/service-integration.yaml). CI
+builds the release payload once per platform and uploads it with SHA-256
+checksums. Integration downloads those exact files from the invoking release
+run; it never rebuilds them. Windows and Ubuntu test fresh installation,
+real DSC Echo reconciliation, service lifecycle and uninstall/data retention.
+Fedora tests RPM lifecycle without systemd, not service startup.
+Failed checks prevent draft creation. Failure diagnostics are uploaded as
+`windows-install-logs` and `linux-install-logs`.
+
+Automated upgrade testing is deferred. Existing scripts still support explicit
+upgrade packages on disposable machines; workflows do not manufacture old
+versions or discover/download historical releases. For example:
+
+```sh
+sudo bash packaging/linux/test-install.sh ./older.deb ./newer.deb
+```
+
+```powershell
+.\packaging\windows\msi\test-install.ps1 -Disposable -MsiPath .\older.msi -UpgradeMsiPath .\newer.msi
+```
+
+These explicit tests require the same separately provisioned DSC prerequisite.
+Installation tests are destructive and disposable-only.
 
 The draft contains (for Linux AMD64 and Windows AMD64):
 
-- `dscd-v0.0.1-rc.1-linux-amd64.tar.gz`
-- `dscd_0.0.1~rc.1_amd64.deb`
-- `dscd-0.0.1~rc.1-1.x86_64.rpm`
-- `dscd-v0.0.1-rc.1-windows-amd64.zip`
-- `dscd-v0.0.1-rc.1-windows-amd64.msi` (recommended Windows installation)
+- `dscd-v0.0.3-linux-amd64.tar.gz`
+- `dscd_0.0.3_amd64.deb`
+- `dscd-0.0.3-1.x86_64.rpm`
+- `dscd-v0.0.3-windows-amd64.zip`
+- `dscd-v0.0.3-windows-amd64.msi` (recommended Windows installation)
 - `SHA256SUMS` covering all release artifacts
 
 Each archive has a versioned root containing `bin/dscd` or `bin/dscd.exe`,
@@ -231,12 +273,31 @@ On Linux, verify downloads with `sha256sum --check --ignore-missing SHA256SUMS`.
 On Windows, use `Get-FileHash -Algorithm SHA256` and compare the archive's
 hash with its entry in `SHA256SUMS`.
 
-Both platform jobs must succeed before a tag and draft are created. The tag
-points to the exact tested workflow revision, not the latest branch head.
-Existing tags are never moved or reused. Review the draft assets and notes in
-**Releases**, then publish it while retaining the pre-release designation.
-If a run fails after creating its tag, inspect the partial draft/tag before
-proceeding with a new candidate version; reruns do not overwrite existing releases.
+After all checks pass, the final job downloads the same artifacts, verifies
+their checksums again, and combines the two checksum lists into `SHA256SUMS`.
+It creates a **draft normal release**, not a prerelease. Review its assets,
+version/source commit, workflow results, and documented coverage in **Releases**,
+then publish manually. The workflow never creates/moves a tag or publishes a
+release automatically.
+
+### Failures and retries
+
+For build/inspection failures, inspect the CI job logs; for installation failures,
+download the diagnostic artifacts and check the separate DSC prerequisite and
+service environment. Package checks must not be bypassed to produce a draft.
+
+Re-run failed integration or draft jobs while their original artifacts remain
+available. If rebuilding is necessary, use **Re-run all jobs** so new artifacts
+also pass integration; the native artifact upload replaces that run's old
+platform artifacts. Never selectively rebuild after testing and then skip
+integration. If artifacts have expired, rerun the whole workflow.
+
+An existing draft/release stops the run rather than being overwritten. If draft
+creation partially failed, inspect it and the uploaded assets manually; remove
+an incomplete draft only after review before retrying the same unchanged tag.
+For source fixes, merge the fix and push a new version tag. Never move a release
+tag. Action SHA pinning is used; attestations, SBOMs, CodeQL and automatic
+upgrade-baseline selection remain separate follow-ups.
 
 ## Foreground execution
 
@@ -523,13 +584,13 @@ Download the matching AMD64 package from GitHub Releases, then:
 Debian / Ubuntu:
 
 ```sh
-sudo apt install ./dscd_0.0.1~rc.1_amd64.deb
+sudo apt install ./dscd_0.0.3_amd64.deb
 ```
 
 Fedora / RHEL-compatible systems:
 
 ```sh
-sudo dnf install ./dscd-0.0.1~rc.1-1.x86_64.rpm
+sudo dnf install ./dscd-0.0.3-1.x86_64.rpm
 ```
 
 Use the filenames for your selected version. Installation enables and starts
@@ -569,8 +630,7 @@ sudo systemctl start dscd
 sudo systemctl restart dscd
 ```
 
-Upgrade by installing a newer package with the same APT/DNF command. Release
-candidates use `~rc.N` in native versions so the stable version sorts later.
+Upgrade by installing a newer package with the same APT/DNF command.
 Upgrades preserve documents/results and restart the service only if it was
 running. Remove with `sudo apt remove dscd` or
 `sudo dnf remove --noautoremove dscd`; removal
@@ -664,10 +724,18 @@ The ZIP and `packaging/windows/install.ps1`, `uninstall.ps1`, and
 `test-service.ps1` remain development/manual-testing options, not MSI dependencies.
 There is no migration from manually registered services.
 Installer build/version details are in [the design](docs/design.md#windows-msi).
-The manual service-integration workflow builds, inspects and installs the MSI
-on a disposable Windows runner; ordinary CI only builds and inspects it.
+Service integration installs the exact release MSI on a disposable Windows
+runner, or builds it for a manual test run. Ordinary CI only builds and inspects.
 
 ## Validation limits
+
+This refactor passed [native Linux/Windows CI](https://github.com/Bpoe/dsc-reconciler/actions/runs/37988454033)
+and [disposable service integration](https://github.com/Bpoe/dsc-reconciler/actions/runs/37988454278).
+The latter exercised fresh MSI/DEB installation, actual Echo reconciliation,
+service lifecycle, repair/reinstall where applicable, uninstall/data retention,
+and Fedora RPM lifecycle. Upload/download artifact IDs and digests matched.
+Final release checksum commands also passed against those downloaded packages;
+no tag or release was created to test the full release entry point.
 
 Local build, unit/process/filesystem tests, vet and race checks ran on Windows
 amd64 and Linux amd64 under WSL. Process cleanup, output limits, replacement of
@@ -676,10 +744,12 @@ and the in-memory SCM lifecycle are covered.
 
 The earlier MSI using explicit DSC paths passed native builds, table inspection
 and lifecycle tests in [service-integration run 37578288245](https://github.com/Bpoe/dsc-reconciler/actions/runs/37578288245).
-That run does not validate the current PATH-based installer. The updated manual
-workflow checks missing-DSC startup failure, PATH-based startup, service/ACL/Event
-Log/recovery behavior, upgrade and payload replacement, downgrade rejection,
-repair, reinstall, uninstall and data retention on a disposable runner.
+That run does not validate the current PATH-based installer. The integration
+workflow checks missing-DSC startup failure, PATH-based startup, actual
+reconciliation, service/ACL/Event Log/recovery behavior, repair, reinstall,
+uninstall and data retention on a disposable runner. Upgrade/payload replacement
+and downgrade-rejection checks require explicitly supplied packages and are not
+part of the automated release gate.
 Host-shutdown delivery and the complete draft-release workflow remain unverified.
 
 Native DEB/RPM builds, metadata, permissions, prerelease ordering and extracted
@@ -697,7 +767,7 @@ a completed GitHub Actions run.
 The opt-in Echo server test on Windows with DSC `3.3.0` passed for YAML/JSON
 configurations with no sidecar and with either inline parameter format in one
 initialized session. Other resources,
-real DSC execution on Linux, power-loss durability and other CPU architectures
+power-loss durability and other CPU architectures
 remain unverified. Linux foreground
 cannot contain descendants that deliberately leave its process group; jobs and
 cgroups cannot contain work delegated to already-running external services.
