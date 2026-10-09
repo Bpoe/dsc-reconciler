@@ -21,6 +21,7 @@ type Options struct {
 	DSCPath          string
 	Interval         time.Duration
 	ExecutionTimeout time.Duration
+	dscPathExplicit  bool
 }
 
 // Parse parses flags without changing the filesystem.
@@ -32,12 +33,17 @@ func Parse(args []string, output io.Writer) (Options, error) {
 	f.BoolVar(&o.Version, "version", false, "print dscd version and exit")
 	f.StringVar(&o.ConfigDir, "config-dir", input, "directory of DSC documents")
 	f.StringVar(&o.ResultsDir, "results-dir", results, "directory for latest results")
-	f.StringVar(&o.DSCPath, "dsc-path", "dsc", "DSC executable name or path")
+	f.StringVar(&o.DSCPath, "dsc-path", "dsc", "DSC executable name or path (Windows defaults to bundled DSC, then PATH)")
 	f.DurationVar(&o.Interval, "interval", 5*time.Minute, "delay after each completed reconciliation pass (positive)")
 	f.DurationVar(&o.ExecutionTimeout, "execution-timeout", 15*time.Minute, "maximum DSC request duration per document (positive)")
 	if err := f.Parse(args); err != nil {
 		return o, err
 	}
+	f.Visit(func(f *flag.Flag) {
+		if f.Name == "dsc-path" {
+			o.dscPathExplicit = true
+		}
+	})
 	if f.NArg() != 0 {
 		return o, errors.New("positional arguments are not supported")
 	}
@@ -66,6 +72,12 @@ func (o *Options) Prepare() error {
 	}
 	if within(o.ConfigDir, o.ResultsDir) || within(o.ResultsDir, o.ConfigDir) {
 		return errors.New("configuration and results directories must be separate, non-nested directories")
+	}
+	if !o.dscPathExplicit && o.DSCPath == "dsc" {
+		o.DSCPath, err = defaultDSCPath()
+		if err != nil {
+			return fmt.Errorf("resolve bundled DSC executable: %w", err)
+		}
 	}
 	o.DSCPath, err = exec.LookPath(o.DSCPath)
 	if err != nil {

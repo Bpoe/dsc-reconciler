@@ -38,13 +38,12 @@ sudo dnf install ./dscd-0.0.2.x86_64.rpm
 ```
 
 #### Windows
-Before installing `dscd`, ensure `dsc.exe` is on the **machine/system PATH**
-visible to LocalSystem. A per-user executable alias or PATH change in your
-terminal is not sufficient; a reboot may be needed after changing the system PATH.
-
 Double-click the downloaded MSI and approve elevation. It installs and starts
-the **dscd** service (**DSC Reconciliation Daemon**). The MSI does not install DSC
-or change PATH.
+the **dscd** service (**DSC Reconciliation Daemon**). Both Windows MSI and ZIP
+include the complete Microsoft DSC **3.3.0** Windows x64 distribution, including
+its resources and upstream licensing files. No separate DSC installation is needed.
+The MSI installs it under `%ProgramFiles%\dscd\dsc`; the ZIP uses `bin\dsc`.
+Neither format changes the machine PATH or touches an independently installed DSC.
 
 ### Check the version
 
@@ -98,8 +97,8 @@ Get-Content "$env:ProgramData\dsc\results.d\web.yaml.result.json" -Raw |
 
 - Go **1.27.x** to build; no Go installation is needed to run the compiled binary.
 - Microsoft **DSC 3.3.0 or later** with `dsc server` and the resources your documents
-  require, installed separately for the account running the daemon. For the Windows
-  MSI service, `dsc.exe` must be on the machine/system PATH visible to LocalSystem.
+  require. Windows release packages include DSC 3.3.0; Linux and unbundled source
+  builds require a separate installation available to the account running the daemon.
   This is modern DSC, not Windows
   PowerShell's `Start-DscConfiguration`.
 - Linux with a local filesystem supporting atomic rename and directory fsync
@@ -207,10 +206,21 @@ On native Windows with Go, PowerShell 7 and the .NET SDK:
 
 ```powershell
 .\packaging\windows\build.ps1 -Version v0.0.3 -OutputDirectory .\dist
-.\packaging\windows\msi\inspect.ps1 -Version v0.0.3 -MsiPath .\dist\dscd-v0.0.3-windows-amd64.msi
+.\packaging\windows\msi\inspect.ps1 -Version v0.0.3 `
+    -MsiPath .\dist\dscd-v0.0.3-windows-amd64.msi `
+    -ArchivePath .\dist\dscd-v0.0.3-windows-amd64.zip
 ```
 
 The builder produces ZIP, MSI and checksums without installing the service.
+It downloads the version-pinned official Windows x64 DSC ZIP once, verifies its
+pinned SHA-256 before extraction, and shares that complete temporary payload
+between both artifacts. Upstream `NOTICE.txt` is retained; the upstream MIT
+`LICENSE` (not shipped in that ZIP) is downloaded from the pinned version and
+checksum-verified alongside it. Downloaded files are removed on success or failure.
+To update bundled DSC, update the version and SHA-256 constants in
+`packaging/windows/build.ps1` using the official release asset's published digest, then
+run package inspection and disposable Windows installation tests and update
+the documented version. Never commit the download or binaries.
 WiX is pinned in its project; its native ICE validation must be permitted by
 the build machine's policy. Make is not required.
 
@@ -249,10 +259,12 @@ sudo bash packaging/linux/test-install.sh ./older.deb ./newer.deb
 ```
 
 ```powershell
-.\packaging\windows\msi\test-install.ps1 -Disposable -MsiPath .\older.msi -UpgradeMsiPath .\newer.msi
+.\packaging\windows\msi\test-install.ps1 -Disposable -Version v0.0.3 `
+    -MsiPath .\dscd-v0.0.3-windows-amd64.msi -ArchivePath .\dscd-v0.0.3-windows-amd64.zip `
+    -UpgradeMsiPath .\dscd-v0.0.4-windows-amd64.msi
 ```
 
-These explicit tests require the same separately provisioned DSC prerequisite.
+The Linux test requires separately installed DSC; the Windows test uses the MSI's bundle.
 Installation tests are destructive and disposable-only.
 
 The draft contains (for Linux AMD64 and Windows AMD64):
@@ -268,7 +280,9 @@ Each archive has a versioned root containing `bin/dscd` or `bin/dscd.exe`,
 platform-specific `packaging` assets, the README, design and agent documentation,
 and the MIT license. Use the native Linux packages for systemd installation, or
 extract an archive for foreground execution. Use the MSI for Windows service installation.
-Building from source is not required. DSC and resources are not bundled.
+Building from source is not required. Windows includes DSC and its resources at
+`bin/dsc`, preserving the upstream distribution layout, licenses and attribution.
+Linux artifacts continue to use separately installed DSC.
 On Linux, verify downloads with `sha256sum --check --ignore-missing SHA256SUMS`.
 On Windows, use `Get-FileHash -Algorithm SHA256` and compare the archive's
 hash with its entry in `SHA256SUMS`.
@@ -283,7 +297,7 @@ release automatically.
 ### Failures and retries
 
 For build/inspection failures, inspect the CI job logs; for installation failures,
-download the diagnostic artifacts and check the separate DSC prerequisite and
+download the diagnostic artifacts and check the runtime/resources and
 service environment. Package checks must not be bypassed to produce a draft.
 
 Re-run failed integration or draft jobs while their original artifacts remain
@@ -319,10 +333,23 @@ Windows:
 ```powershell
 New-Item -ItemType Directory -Force .\local-config | Out-Null
 .\bin\dscd.exe -config-dir .\local-config -results-dir .\local-results `
-    -dsc-path 'C:\Program Files\DSC\dsc.exe' -interval 5m -execution-timeout 15m
+    -interval 5m -execution-timeout 15m
 ```
 
-Adjust the executable path to your installation. Paths with spaces are supported.
+Windows uses `dsc\dsc.exe` beside the running `dscd.exe`, independent of the
+working directory; if absent it resolves `dsc` through PATH/PATHEXT. An explicit
+`-dsc-path` selects that executable instead, including `-dsc-path dsc` for PATH
+lookup; an invalid override fails startup rather than falling back to the bundle.
+Linux always defaults to `dsc` through PATH. Paths with spaces are supported.
+When using the bundle, only the DSC child's PATH is prefixed with its directory;
+all inherited variables (including `PSModulePath`) remain available. DSC discovers
+root-level bundled manifests and external resources through PATH by default.
+If `DSC_RESOURCE_PATH` is set, DSC uses it instead of PATH for manifests:
+`dscd` retains those locations in order and appends the bundle directory.
+An explicit `DSC_RESTRICTED_PATH` is respected unchanged, including its isolation
+from bundled resources. Nothing changes the parent, machine or user environment.
+External PowerShell resources still require their own modules and appropriate
+PowerShell installation, accessible to the daemon account.
 Logs are structured JSON on stderr. Ctrl+C stops foreground execution; Linux
 also handles SIGTERM. Startup errors exit nonzero. A handled stop exits zero;
 exceeding the 30-second shutdown bound exits nonzero.
@@ -334,7 +361,7 @@ exceeding the 30-second shutdown bound exits nonzero.
 | `--version` | `false` | Print the dscd build version to stdout and exit without daemon startup. |
 | `-config-dir` | Linux `/etc/dsc/config.d`; Windows `%ProgramData%\dsc\config.d` | Existing readable input directory. |
 | `-results-dir` | Linux `/var/lib/dsc/results.d`; Windows `%ProgramData%\dsc\results.d` | Results directory, privately created if absent. |
-| `-dsc-path` | `dsc` | Executable path or name, resolved once at startup through PATH/PATHEXT. |
+| `-dsc-path` | Windows: adjacent `dsc\dsc.exe`, then `dsc`; Linux: `dsc` | Explicit executable path or name overrides automatic selection; resolved once at startup. |
 | `-interval` | `5m` | Positive delay after each completed reconciliation pass. |
 | `-execution-timeout` | `15m` | Positive per-configuration JSON-RPC request timeout. Later documents continue on a fresh server after a timeout. |
 
@@ -644,21 +671,12 @@ do not request dependency auto-removal if DSC must remain installed.
 
 ## Windows service: native MSI
 
-First install Microsoft DSC **3.3.0 or later** and the required resources
-machine-wide. The official Windows x64 [DSC release ZIP](https://github.com/PowerShell/DSC/releases/tag/v3.3.0)
-can be extracted by an administrator to `%ProgramFiles%\DSC`, with `dsc.exe`
-directly in that directory. Add that directory to the **machine/system PATH**,
-as described in [Microsoft's installation instructions](https://learn.microsoft.com/en-us/powershell/dsc/install?view=dsc-3.0).
-`dsc.exe` must be discoverable through the PATH visible to **LocalSystem before
-installing or starting dscd**. A per-user WinGet/Store alias or a change to the
-current PowerShell session's PATH is insufficient. LocalSystem must also be able
-to access DSC's resources; protect DSC, resources and PATH directories against
-unprivileged writes.
-
-Windows services may retain an older environment after a system PATH change.
-Reboot before installing/starting dscd if needed to make the new PATH visible to
-the service. A successful `dsc.exe --version` in your interactive shell alone
-does not establish LocalSystem access.
+Microsoft DSC **3.3.0** and the resources in its official distribution are included.
+Additional resources must be installed for the account running the daemon.
+LocalSystem must be able to access external resources; protect their files and
+search directories against unprivileged writes. Per-user modules and aliases
+are not automatically available to a service. Changes to the system environment
+may require a reboot before an existing SCM host sees them.
 
 Download the MSI from a release and double-click it, approving elevation,
 or run:
@@ -674,16 +692,10 @@ For unattended installation, use an elevated session:
 msiexec /i .\dscd-<version>-windows-amd64.msi /qn /norestart
 ```
 
-The MSI does not accept, discover, validate or save a DSC executable path, change
-PATH, validate the DSC version, download DSC or install resources. It uses
-`dscd`'s default executable name, `dsc`, resolved at service startup. Verify DSC
-3.3.0+ and service-account access before installation. Missing DSC causes service
-startup to fail; MSI installation then fails through its normal service-start
-handling, without a custom prerequisite message. Inspect the MSI log and the
-Application Event Log for details.
-This failure need not be prompt: an installation without DSC exceeded the smoke
-test's two-minute limit waiting in Windows Installer's service-start action.
-Provision the prerequisite before running the MSI.
+The MSI installs its bundled DSC runtime and resources in
+`%ProgramFiles%\dscd\dsc`. It does not accept or save a DSC executable setting,
+discover external installations, change PATH, or download files during installation.
+The service automatically selects this bundle.
 Go, WiX and PowerShell are not required on the target machine.
 
 The MSI installs `%ProgramFiles%\dscd\dscd.exe`, registers **dscd**
@@ -708,15 +720,15 @@ Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='dscd'} -Max
 Stop-Service dscd
 Start-Service dscd
 Restart-Service dscd
-# Upgrade by installing a newer MSI; DSC must remain on the machine PATH.
+# Upgrade by installing a newer MSI, including its bundled DSC runtime.
 msiexec /i .\dscd-<new-version>-windows-amd64.msi /qn /norestart
 # Uninstall using the installed package, or Windows Installed apps:
 msiexec /x .\dscd-<installed-version>-windows-amd64.msi /qn /norestart
 ```
 
 Upgrades stop the service before replacing it and restart it afterward.
-Uninstall removes the executable, service and package-owned Event Log source,
-but retains both data directories, documents, results, Microsoft DSC and
+Uninstall removes the executable, bundled DSC, service and package-owned Event Log source,
+but retains both data directories, documents, results, independently installed DSC and
 previously reconciled machine state. Standard MSI repair restores package-owned
 resources without overwriting configuration documents.
 
@@ -744,8 +756,8 @@ and the in-memory SCM lifecycle are covered.
 
 The earlier MSI using explicit DSC paths passed native builds, table inspection
 and lifecycle tests in [service-integration run 37578288245](https://github.com/Bpoe/dsc-reconciler/actions/runs/37578288245).
-That run does not validate the current PATH-based installer. The integration
-workflow checks missing-DSC startup failure, PATH-based startup, actual
+Those historical runs do not validate the bundled-runtime installer. The integration
+workflow checks bundled DSC version/discovery, automatic bundled startup, actual
 reconciliation, service/ACL/Event Log/recovery behavior, repair, reinstall,
 uninstall and data retention on a disposable runner. Upgrade/payload replacement
 and downgrade-rejection checks require explicitly supplied packages and are not

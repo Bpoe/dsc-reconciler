@@ -3,9 +3,8 @@
 param(
     [Parameter(Mandatory)][string] $MsiPath,
     [string] $UpgradeMsiPath,
-    [string] $Version,
-    [string] $ArchivePath,
-    [switch] $ProvisionDSC,
+    [Parameter(Mandatory)][string] $Version,
+    [Parameter(Mandatory)][string] $ArchivePath,
     [switch] $Disposable
 )
 
@@ -25,54 +24,12 @@ if ($UpgradeMsiPath) {
     $UpgradeMsiPath = (Resolve-Path -LiteralPath $UpgradeMsiPath).Path
 }
 
-if ($ProvisionDSC) {
-    $dscRoot = Join-Path $env:ProgramFiles 'DSC smoke test'
-    $archive = Join-Path ([IO.Path]::GetTempPath()) 'dsc.zip'
-    Invoke-WebRequest -Uri 'https://github.com/PowerShell/DSC/releases/download/v3.3.0/DSC-3.3.0-x86_64-pc-windows-msvc.zip' `
-        -OutFile $archive
-    Expand-Archive -LiteralPath $archive -DestinationPath $dscRoot
-    $dsc = Join-Path $dscRoot 'dsc.exe'
-    & $dsc --version
-    if ($LASTEXITCODE -ne 0) {
-        throw 'DSC prerequisite does not run.'
-    }
-
-    # SCM retains its boot-time PATH; use the existing disposable-runner fixture.
-    $pathDirectory = Join-Path $env:ProgramFiles 'PowerShell\7'
-    $machinePaths = [Environment]::GetEnvironmentVariable('PATH', 'Machine').Split(';') |
-        ForEach-Object { [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') }
-    if ($pathDirectory -notin $machinePaths) {
-        throw 'PowerShell 7 must already be on the image machine PATH.'
-    }
-
-    New-Item -ItemType SymbolicLink -Path (Join-Path $pathDirectory 'dsc.exe') -Target $dsc | Out-Null
-}
-
-# Check only the machine PATH, excluding interactive-user executable aliases.
-# The runner must provision this PATH for LocalSystem before invoking the test.
-$originalPath = $env:PATH
-try {
-    $env:PATH = [Environment]::GetEnvironmentVariable('PATH', 'Machine')
-    $dscExecutable = (Get-Command dsc.exe -CommandType Application -ErrorAction Stop).Source
-}
-finally {
-    $env:PATH = $originalPath
-}
-
-$dscVersionOutput = & $dscExecutable --version
-if ($LASTEXITCODE -ne 0) {
-    throw 'The supplied DSC executable does not run.'
-}
-
-$match = [regex]::Match(($dscVersionOutput -join ' '), '\b(\d+\.\d+\.\d+)\b')
-if (-not $match.Success -or [version]$match.Groups[1].Value -lt [version]'3.3.0') {
-    throw 'Smoke tests require actual Microsoft DSC 3.3.0 or later, supplied by CI, not the installer.'
-}
-
 $programFiles = [Environment]::GetFolderPath('ProgramFiles')
 $data = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'dsc'
 $binary = Join-Path $programFiles 'dscd\dscd.exe'
 $license = Join-Path $programFiles 'dscd\LICENSE'
+$dscDirectory = Join-Path $programFiles 'dscd\dsc'
+$dscExecutable = Join-Path $dscDirectory 'dsc.exe'
 $config = Join-Path $data 'config.d'
 $results = Join-Path $data 'results.d'
 $eventKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\dscd'
@@ -84,21 +41,24 @@ if ((Get-Service dscd -ErrorAction SilentlyContinue) -or
 }
 
 $logDirectory = Join-Path $PSScriptRoot ("test-output/" + [guid]::NewGuid().ToString('N'))
+$testStage = Join-Path ([IO.Path]::GetTempPath()) ('dscd-msi-test-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 $installedMsi = $null
 $currentMsi = $MsiPath
 $started = Get-Date
-$expectedHash = $null
-if ($ArchivePath) {
-    if (-not $Version) {
-        throw 'ArchivePath requires Version.'
-    }
-
-    $archiveDirectory = Join-Path $logDirectory 'archive'
-    Expand-Archive -LiteralPath $ArchivePath -DestinationPath $archiveDirectory
-    $archiveBinary = Join-Path $archiveDirectory "dscd-$Version-windows-amd64\bin\dscd.exe"
-    $expectedHash = (Get-FileHash -LiteralPath $archiveBinary -Algorithm SHA256).Hash
-}
+$archiveDirectory = Join-Path $testStage 'archive'
+$archiveRoot = Join-Path $archiveDirectory "dscd-$Version-windows-amd64"
+$archiveBinary = Join-Path $archiveRoot 'bin\dscd.exe'
+$expectedDSCDirectory = Join-Path $archiveRoot 'bin\dsc'
+$machinePath = [Environment]::GetEnvironmentVariable('PATH', 'Machine')
+$userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
+$processPath = $env:PATH
+$existingDSC = @(Get-Command dsc.exe -CommandType Application -All -ErrorAction SilentlyContinue |
+    ForEach-Object { [pscustomobject]@{ Path = $_.Source; Hash = (Get-FileHash -LiteralPath $_.Source).Hash } })
+# A separate complete distribution proves uninstall never removes standalone
+# DSC. Neither the test nor the package adds it to the machine or user PATH.
+$standaloneDSC = Join-Path $testStage 'standalone DSC'
+$expectedInstalledRoot = $null
 
 function Assert([bool] $Condition, [string] $Message) {
     if (-not $Condition) {
@@ -112,12 +72,151 @@ function Invoke-Msi([string[]] $Arguments, [string] $LogName, [int] $Expected = 
     try {
         if (-not $process.WaitForExit(120000)) {
             $process.Kill()
+            [void]$process.WaitForExit(10000)
             throw "msiexec timed out; log: $log"
         }
         Assert ($process.ExitCode -eq $Expected) "msiexec exit $($process.ExitCode), expected $Expected; log: $log"
     }
     finally {
         $process.Dispose()
+    }
+}
+
+function File-Hashes([string] $Root) {
+    $hashes = @{}
+    foreach ($file in (Get-ChildItem -LiteralPath $Root -File -Recurse -Force)) {
+        $hashes[[IO.Path]::GetRelativePath($Root, $file.FullName)] =
+            (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+    }
+    return $hashes
+}
+
+function Assert-Payload([string] $Actual, [string] $Expected) {
+    $actualHashes = File-Hashes $Actual
+    $expectedHashes = File-Hashes $Expected
+    Assert ($actualHashes.Count -eq $expectedHashes.Count) "complete file set in $Actual"
+    foreach ($relative in $expectedHashes.Keys) {
+        Assert ($actualHashes[$relative] -ceq $expectedHashes[$relative]) "exact payload $relative"
+    }
+}
+
+function Assert-Standalone {
+    Assert ([Environment]::GetEnvironmentVariable('PATH', 'Machine') -ceq $machinePath) 'machine PATH unchanged'
+    Assert ([Environment]::GetEnvironmentVariable('PATH', 'User') -ceq $userPath) 'user PATH unchanged'
+    Assert ($env:PATH -ceq $processPath) 'process PATH unchanged'
+    Assert-Payload $standaloneDSC $expectedDSCDirectory
+    foreach ($entry in $existingDSC) {
+        Assert ((Get-FileHash -LiteralPath $entry.Path).Hash -ceq $entry.Hash) "pre-existing standalone DSC preserved: $($entry.Path)"
+    }
+}
+
+function Extract-Msi([string] $Path, [string] $Name) {
+    $directory = Join-Path $testStage $Name
+    Invoke-Msi @('/a', "`"$Path`"", "TARGETDIR=`"$directory`"") "$Name-extract"
+    $daemon = @(Get-ChildItem -LiteralPath $directory -Filter dscd.exe -File -Recurse)
+    Assert ($daemon.Count -eq 1) 'one administratively extracted daemon'
+    return $daemon[0].DirectoryName
+}
+
+function Write-CustomResource([string] $Directory) {
+    New-Item -ItemType Directory -Path $Directory -Force | Out-Null
+    $helper = Join-Path $Directory 'custom-resource.ps1'
+    [IO.File]::WriteAllText($helper, @'
+param([string] $Operation, [string] $InputJson)
+if ($Operation -eq 'Schema') {
+    '{"$schema":"http://json-schema.org/draft-07/schema#","type":"object","properties":{"output":{"type":"string"}},"required":["output"],"additionalProperties":false}'
+}
+elseif ($InputJson) {
+    $InputJson
+}
+else {
+    '{"output":"custom discovery preserved"}'
+}
+'@)
+    $prefix = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $helper, '-Operation')
+    $inputArgument = @{ jsonInputArg = '-InputJson'; mandatory = $true }
+    $powershell = Join-Path $PSHOME 'pwsh.exe'
+    $manifest = @{
+        '$schema' = 'https://aka.ms/dsc/schemas/v3/bundled/resource/manifest.json'
+        type = 'DSCD.Package/CustomDiscovery'
+        version = '1.0.0'
+        get = @{ executable = $powershell; args = $prefix + @('Get', $inputArgument) }
+        set = @{ executable = $powershell; args = $prefix + @('Set', $inputArgument) }
+        schema = @{ command = @{ executable = $powershell; args = $prefix + @('Schema') } }
+    } | ConvertTo-Json -Depth 10
+    [IO.File]::WriteAllText((Join-Path $Directory 'custom.dsc.resource.json'), $manifest)
+}
+
+function Invoke-BundledDSC([string] $Executable, [string] $Daemon, [string[]] $Arguments, [string] $CustomDirectory) {
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $Executable
+    $startInfo.WorkingDirectory = $testStage
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($argument in $Arguments) {
+        $startInfo.ArgumentList.Add($argument)
+    }
+    $bundle = Join-Path (Split-Path $Daemon) 'dsc'
+    $keys = @($startInfo.Environment.Keys)
+    # Mirror the daemon's child-only discovery environment, including isolation.
+    if ([IO.Path]::GetFullPath($Executable) -ieq (Join-Path $bundle 'dsc.exe') -and
+        'DSC_RESTRICTED_PATH' -notin $keys) {
+        $pathKey = @($keys | Where-Object { $_ -ieq 'PATH' } | Select-Object -First 1)
+        $pathName = if ($pathKey.Count) { $pathKey[0] } else { 'PATH' }
+        $inheritedPath = $startInfo.Environment[$pathName]
+        $startInfo.Environment[$pathName] = $bundle
+        if ($inheritedPath) {
+            $startInfo.Environment[$pathName] += ';' + $inheritedPath
+        }
+        $resourceKey = @($keys | Where-Object { $_ -ieq 'DSC_RESOURCE_PATH' } | Select-Object -First 1)
+        if ($resourceKey.Count -or $CustomDirectory) {
+            $resourceName = if ($resourceKey.Count) { $resourceKey[0] } else { 'DSC_RESOURCE_PATH' }
+            $locations = $startInfo.Environment[$resourceName]
+            if ($CustomDirectory) {
+                if ($locations) { $locations += ';' }
+                $locations += $CustomDirectory
+            }
+            if ($locations) { $locations += ';' }
+            $startInfo.Environment[$resourceName] = $locations + $bundle
+        }
+    }
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        Assert ($process.Start()) 'start bundled DSC command'
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(60000)) {
+            $process.Kill($true)
+            [void]$process.WaitForExit(10000)
+            throw 'Bundled DSC command timed out.'
+        }
+        $output = $stdout.GetAwaiter().GetResult()
+        [void]$stderr.GetAwaiter().GetResult()
+        Assert ($process.ExitCode -eq 0) "bundled DSC command exit $($process.ExitCode)"
+        return $output.TrimEnd([char[]]"`r`n")
+    }
+    finally {
+        $process.Dispose()
+    }
+}
+
+function Assert-BundledResources([string] $Executable, [string] $Daemon, [string] $ExpectedVersion) {
+    $versionOutput = Invoke-BundledDSC $Executable $Daemon @('--version')
+    Assert ($versionOutput -ceq $ExpectedVersion) 'direct bundled DSC exact version'
+    $customDirectory = Join-Path $testStage 'direct custom resources'
+    Write-CustomResource $customDirectory
+    foreach ($external in @('', $customDirectory)) {
+        $output = Invoke-BundledDSC $Executable $Daemon @('resource', 'list', '--output-format', 'json') $external
+        $resources = @($output -split '\r?\n' | Where-Object { $_.Trim() } | ForEach-Object { $_ | ConvertFrom-Json })
+        foreach ($type in @('Microsoft.DSC.Debug/Echo', 'Microsoft/OSInfo', 'Microsoft.Windows/Registry')) {
+            Assert ($type -in $resources.type) "direct bundled resource discovery: $type"
+        }
+        if ($external) {
+            Assert ('DSCD.Package/CustomDiscovery' -in $resources.type) 'external custom manifest remains discoverable alongside bundled resources'
+        }
     }
 }
 
@@ -146,6 +245,18 @@ function Assert-Installed {
             Assert ((Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash -ceq $expectedHash) 'MSI and ZIP contain the same executable'
         }
     }
+    Assert-Payload $dscDirectory (Join-Path $expectedInstalledRoot 'dsc')
+    Assert ((Get-FileHash -LiteralPath $binary).Hash -ceq
+        (Get-FileHash -LiteralPath (Join-Path $expectedInstalledRoot 'dscd.exe')).Hash) 'installed daemon exactly matches current MSI'
+    $expectedDscVersion = & (Join-Path $expectedInstalledRoot 'dsc\dsc.exe') --version
+    Assert ($LASTEXITCODE -eq 0) 'current MSI DSC executable runs'
+    $dscVersion = & $dscExecutable --version
+    Assert ($LASTEXITCODE -eq 0 -and ($dscVersion -join "`n") -ceq ($expectedDscVersion -join "`n")) 'installed DSC version matches current MSI'
+    if ($currentMsi -eq $MsiPath) {
+        Assert (($dscVersion -join "`n") -ceq 'dsc 3.3.0') 'initial bundled stable DSC 3.3.0'
+    }
+    Assert-BundledResources $dscExecutable $binary ($expectedDscVersion -join "`n")
+    Assert-Standalone
 
     $service = Get-Service dscd
     try {
@@ -158,7 +269,7 @@ function Assert-Installed {
     $registration = Get-CimInstance Win32_Service -Filter "Name='dscd'"
     Assert ($registration.StartName -eq 'LocalSystem' -and $registration.StartMode -eq 'Auto') 'LocalSystem automatic startup'
     $expectedCommand = '"{0}" -config-dir "{1}\." -results-dir "{2}\."' -f $binary, $config, $results
-    Assert ($registration.PathName -ceq $expectedCommand) 'quoted service paths with default DSC lookup'
+    Assert ($registration.PathName -ceq $expectedCommand) 'quoted service paths with default bundled DSC lookup'
     Assert (-not (Test-Path $settingsKey)) 'no persisted DSC path'
     foreach ($directory in @($data, $config, $results)) {
         Assert (Test-Path -LiteralPath $directory -PathType Container) "directory $directory"
@@ -188,11 +299,14 @@ function Assert-Uninstalled {
     Assert ((Get-Content -Raw -LiteralPath (Join-Path $results 'retained.txt')) -ceq 'result marker') 'result data preserved'
     Assert (Test-Path -LiteralPath (Join-Path $config 'package-smoke.json')) 'reconciled configuration preserved'
     Assert (Test-Path -LiteralPath (Join-Path $results 'package-smoke.json.result.json')) 'DSC result preserved'
+    Assert (Test-Path -LiteralPath (Join-Path $config 'package-registry.json')) 'registry audit configuration preserved'
+    Assert (Test-Path -LiteralPath (Join-Path $results 'package-registry.json.result.json')) 'registry audit result preserved'
     foreach ($directory in @($data, $config, $results)) {
         Assert-ACL $directory
     }
 
-    Assert (Test-Path -LiteralPath $dscExecutable) 'DSC left installed'
+    Assert (@(Get-ChildItem -LiteralPath $dscDirectory -File -Recurse -Force -ErrorAction SilentlyContinue).Count -eq 0) 'all MSI-owned DSC files removed'
+    Assert-Standalone
 }
 
 function Assert-Reconciliation {
@@ -206,15 +320,36 @@ function Assert-Reconciliation {
     }
 
     $resultPath = Join-Path $results 'package-smoke.json.result.json'
-    if (Test-Path -LiteralPath $resultPath) {
-        Remove-Item -LiteralPath $resultPath
+    $registryResultPath = Join-Path $results 'package-registry.json.result.json'
+    foreach ($path in @($resultPath, $registryResultPath)) {
+        if (Test-Path -LiteralPath $path) {
+            Remove-Item -LiteralPath $path
+        }
     }
 
     $document = '{"$schema":"https://aka.ms/dsc/schemas/v3/bundled/config/document.json","resources":[{"name":"Package smoke","type":"Microsoft.DSC.Debug/Echo","properties":{"output":"dscd package smoke"}}]}'
     [IO.File]::WriteAllText((Join-Path $config 'package-smoke.json'), $document)
+    # Unlike Echo, Registry needs its shipped manifest and registry.exe.
+    # Audit an existing machine value: the test does not change OS state.
+    $productName = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').ProductName
+    $registryDocument = @{
+        '$schema' = 'https://aka.ms/dsc/schemas/v3/bundled/config/document.json'
+        metadata = @{ dscd = @{ operation = 'test' } }
+        resources = @(@{
+            name = 'Bundled Registry audit'
+            type = 'Microsoft.Windows/Registry'
+            properties = @{
+                keyPath = 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+                valueName = 'ProductName'
+                valueData = @{ String = $productName }
+            }
+        })
+    } | ConvertTo-Json -Depth 10
+    [IO.File]::WriteAllText((Join-Path $config 'package-registry.json'), $registryDocument)
     Start-Service dscd
     $deadline = [Diagnostics.Stopwatch]::StartNew()
-    while (-not (Test-Path -LiteralPath $resultPath) -and $deadline.Elapsed.TotalSeconds -lt 60) {
+    while ((-not (Test-Path -LiteralPath $resultPath) -or -not (Test-Path -LiteralPath $registryResultPath)) -and
+        $deadline.Elapsed.TotalSeconds -lt 60) {
         Start-Sleep -Milliseconds 500
     }
 
@@ -223,22 +358,89 @@ function Assert-Reconciliation {
     Assert ($result.configuration -ceq 'package-smoke.json' -and $result.outcome -ceq 'succeeded') 'successful DSC reconciliation'
     Assert ($result.dscResult.hadErrors -eq $false -and $result.dscResult.results.Count -eq 1) 'one successful resource'
     Assert ($result.dscResult.results[0].result.afterState.output -ceq 'dscd package smoke') 'actual DSC Echo execution'
+    Assert (Test-Path -LiteralPath $registryResultPath) 'bundled Registry reconciliation produced a result'
+    $registryResult = Get-Content -Raw -LiteralPath $registryResultPath | ConvertFrom-Json
+    Assert ($registryResult.outcome -ceq 'succeeded' -and $registryResult.operation -ceq 'test' -and
+        $registryResult.dscResult.hadErrors -eq $false -and $registryResult.dscResult.results.Count -eq 1) 'actual bundled Registry audit'
+    Assert ($registryResult.dscResult.results[0].result.inDesiredState -eq $true -and
+        $registryResult.dscResult.results[0].result.actualState.valueData.String -ceq $productName) 'Registry manifest and helper executable work under LocalSystem'
+}
+
+function Assert-ZIP {
+    $directory = Join-Path $testStage 'ZIP foreground with spaces'
+    $inputDirectory = Join-Path $directory 'config'
+    $outputDirectory = Join-Path $directory 'results'
+    $customResourceDirectory = Join-Path $directory 'custom resources'
+    New-Item -ItemType Directory -Path $inputDirectory, $outputDirectory, $customResourceDirectory -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $config 'package-smoke.json'), (Join-Path $config 'package-registry.json') `
+        -Destination $inputDirectory
+    $archiveDSC = Join-Path (Split-Path $archiveBinary) 'dsc'
+    Write-CustomResource $customResourceDirectory
+    Assert-BundledResources (Join-Path $archiveDSC 'dsc.exe') $archiveBinary 'dsc 3.3.0'
+    $customDocument = '{"$schema":"https://aka.ms/dsc/schemas/v3/bundled/config/document.json","resources":[{"name":"Custom discovery","type":"DSCD.Package/CustomDiscovery","properties":{"output":"custom discovery preserved"}}]}'
+    [IO.File]::WriteAllText((Join-Path $inputDirectory 'package-custom.json'), $customDocument)
+    # DSC_RESOURCE_PATH replaces manifest discovery through PATH. Both this
+    # custom manifest and the bundled Registry manifest must remain discoverable.
+    $resourcePath = $env:DSC_RESOURCE_PATH
+    try {
+        $env:DSC_RESOURCE_PATH = if ($resourcePath) { "$resourcePath;$customResourceDirectory" } else { $customResourceDirectory }
+        $process = Start-Process -FilePath $archiveBinary -ArgumentList @('-config-dir', "`"$inputDirectory`"",
+            '-results-dir', "`"$outputDirectory`"", '-interval', '1h') -WorkingDirectory $directory -PassThru `
+            -RedirectStandardOutput (Join-Path $logDirectory 'zip-stdout.log') -RedirectStandardError (Join-Path $logDirectory 'zip-stderr.log')
+    }
+    finally {
+        $env:DSC_RESOURCE_PATH = $resourcePath
+    }
+    try {
+        $deadline = [Diagnostics.Stopwatch]::StartNew()
+        $resultFiles = @('package-smoke.json.result.json', 'package-registry.json.result.json', 'package-custom.json.result.json')
+        foreach ($name in $resultFiles) {
+            $resultPath = Join-Path $outputDirectory $name
+            while (-not (Test-Path -LiteralPath $resultPath) -and $deadline.Elapsed.TotalSeconds -lt 60 -and
+                -not $process.HasExited) {
+                Start-Sleep -Milliseconds 250
+            }
+            Assert (Test-Path -LiteralPath $resultPath) "ZIP foreground result $name"
+            $result = Get-Content -Raw -LiteralPath $resultPath | ConvertFrom-Json
+            Assert ($result.outcome -ceq 'succeeded' -and $result.dscResult.hadErrors -eq $false) "ZIP bundled resource execution $name"
+            if ($name -ceq 'package-custom.json.result.json') {
+                Assert ($result.dscResult.results[0].result.afterState.output -ceq 'custom discovery preserved') 'inherited custom manifest discovery retained'
+            }
+        }
+        Assert (-not $process.HasExited) 'ZIP daemon continues foreground execution'
+    }
+    finally {
+        if (-not $process.HasExited) {
+            $process.Kill()
+            Assert ($process.WaitForExit(40000)) 'ZIP foreground daemon terminates'
+        }
+        $process.Dispose()
+    }
+    Assert-Standalone
 }
 
 try {
+    New-Item -ItemType Directory -Path $testStage -Force | Out-Null
+    Expand-Archive -LiteralPath $ArchivePath -DestinationPath $archiveDirectory
+    $expectedHash = (Get-FileHash -LiteralPath $archiveBinary -Algorithm SHA256).Hash
+    Copy-Item -LiteralPath $expectedDSCDirectory -Destination $standaloneDSC -Recurse
+    & "$PSScriptRoot\inspect.ps1" -MsiPath $MsiPath -Version $Version -ArchivePath $ArchivePath
+    $expectedInstalledRoot = Extract-Msi $MsiPath 'expected-install'
+    Assert-Payload (Join-Path $expectedInstalledRoot 'dsc') $expectedDSCDirectory
     Invoke-Msi @('/i', "`"$MsiPath`"") 'install'
     $installedMsi = $MsiPath
     Assert-Installed
     Assert-Reconciliation
+    Assert-ZIP
     $service = Get-Service dscd
     try {
         Stop-Service dscd
         $service.WaitForStatus('Stopped', [timespan]::FromSeconds(40))
-        # Verify missing DSC at the service boundary. A negative MSI install can
-        # remain in native StartServices beyond the test's two-minute limit.
+        # A present but unusable bundle must not silently fall back to PATH.
         $hiddenExecutable = "$dscExecutable.unavailable"
         Move-Item -LiteralPath $dscExecutable -Destination $hiddenExecutable
         try {
+            New-Item -ItemType Directory -Path $dscExecutable | Out-Null
             $missingStarted = Get-Date
             $rejected = $false
             try {
@@ -248,12 +450,15 @@ try {
                 $rejected = $true
             }
 
-            Assert $rejected 'service startup rejects missing DSC on PATH'
+            Assert $rejected 'service startup rejects an unusable bundled DSC executable'
             $service.WaitForStatus('Stopped', [timespan]::FromSeconds(40))
             $failures = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'dscd'; StartTime = $missingStarted })
-            Assert (@($failures.Message -match 'resolve DSC executable').Count -gt 0) 'missing DSC produces an actionable startup error'
+            Assert (@($failures.Message -match 'DSC executable').Count -gt 0) 'unusable bundled DSC produces an actionable startup error'
         }
         finally {
+            if (Test-Path -LiteralPath $dscExecutable -PathType Container) {
+                Remove-Item -LiteralPath $dscExecutable
+            }
             Move-Item -LiteralPath $hiddenExecutable -Destination $dscExecutable
         }
 
@@ -304,7 +509,7 @@ try {
         [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($productInspector)
         Assert ($versions[1] -gt $versions[0] -and $codes[1] -ne $codes[0]) 'upgrade requires higher version and new ProductCode'
         $oldFingerprint = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash
-        # Upgrades continue using the service's machine PATH.
+        $expectedInstalledRoot = Extract-Msi $UpgradeMsiPath 'expected-upgrade'
         Invoke-Msi @('/i', "`"$UpgradeMsiPath`"") 'upgrade'
         $installedMsi = $UpgradeMsiPath
         $currentMsi = $UpgradeMsiPath
@@ -314,7 +519,7 @@ try {
         Assert ((Get-Content -Raw -LiteralPath (Join-Path $results 'retained.txt')) -ceq 'result marker') 'result data survives upgrade'
         Invoke-Msi @('/i', "`"$MsiPath`"") 'downgrade-rejected' 1603
         Assert-Installed
-        Write-Output 'MSI upgrade, PATH-based DSC lookup, data preservation, and downgrade rejection passed.'
+        Write-Output 'MSI upgrade, exact bundled payload, data preservation, and downgrade rejection passed.'
         Assert-Reconciliation
     }
     else {
@@ -323,8 +528,12 @@ try {
     Stop-Service dscd
     (Get-Service dscd).WaitForStatus('Stopped', [timespan]::FromSeconds(40))
     Remove-Item -LiteralPath $binary
+    Remove-Item -LiteralPath $dscExecutable
+    Remove-Item -LiteralPath (Join-Path $dscDirectory 'registry.exe')
+    Remove-Item -LiteralPath (Join-Path $dscDirectory 'registry.dsc.manifests.json')
     Invoke-Msi @('/fa', "`"$currentMsi`"") 'repair'
     Assert-Installed
+    Assert-Reconciliation
     Invoke-Msi @('/x', "`"$currentMsi`"") 'uninstall'
     $installedMsi = $null
     Assert-Uninstalled
@@ -334,7 +543,7 @@ try {
     Invoke-Msi @('/x', "`"$currentMsi`"") 'final-uninstall'
     $installedMsi = $null
     Assert-Uninstalled
-    Write-Output "MSI prerequisite, install, recovery, repair, reinstall, and uninstall passed. Logs: $logDirectory"
+    Write-Output "MSI bundled payload, install, recovery, repair, reinstall, and uninstall passed. Logs: $logDirectory"
 }
 finally {
     try {
@@ -343,11 +552,18 @@ finally {
             Format-List TimeCreated, Id, Message | Out-File (Join-Path $logDirectory 'events.log')
     }
     finally {
-        if ($installedMsi) {
-            Invoke-Msi @('/x', "`"$installedMsi`"") 'cleanup-uninstall'
+        try {
+            if ($installedMsi) {
+                Invoke-Msi @('/x', "`"$installedMsi`"") 'cleanup-uninstall'
+            }
+        }
+        finally {
+            if (Test-Path -LiteralPath $testStage) {
+                Remove-Item -LiteralPath $testStage -Recurse -Force
+            }
         }
     }
 
-    # Logs and retained data are intentionally left on this disposable machine.
+    # Only logs and retained data are left on this disposable machine.
     # No recursive deletion or machine-state reversal is part of the installer.
 }

@@ -55,7 +55,8 @@ jobs:
         run: |
           .\packaging\windows\build.ps1 -Version $env:RELEASE_VERSION -OutputDirectory "$env:RUNNER_TEMP\dist"
           .\packaging\windows\msi\inspect.ps1 `
-              -MsiPath "$env:RUNNER_TEMP\dist\dscd-$env:RELEASE_VERSION-windows-amd64.msi" -Version $env:RELEASE_VERSION
+              -MsiPath "$env:RUNNER_TEMP\dist\dscd-$env:RELEASE_VERSION-windows-amd64.msi" -Version $env:RELEASE_VERSION `
+              -ArchivePath "$env:RUNNER_TEMP\dist\dscd-$env:RELEASE_VERSION-windows-amd64.zip"
       - name: Build and inspect manual Linux packages
         if: github.event_name == 'workflow_dispatch' && runner.os == 'Linux'
         shell: bash
@@ -98,7 +99,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          .\packaging\windows\msi\test-install.ps1 -Disposable -ProvisionDSC `
+          .\packaging\windows\msi\test-install.ps1 -Disposable `
               -MsiPath "$env:RUNNER_TEMP\packages\dscd-$env:RELEASE_VERSION-windows-amd64.msi" `
               -Version $env:RELEASE_VERSION -ArchivePath "$env:RUNNER_TEMP\packages\dscd-$env:RELEASE_VERSION-windows-amd64.zip"
       - name: Debian lifecycle and reconciliation with real systemd
