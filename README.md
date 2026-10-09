@@ -729,6 +729,14 @@ runner, or builds it for a manual test run. Ordinary CI only builds and inspects
 
 ## Validation limits
 
+This refactor passed [native Linux/Windows CI](https://github.com/Bpoe/dsc-reconciler/actions/runs/37988454033)
+and [disposable service integration](https://github.com/Bpoe/dsc-reconciler/actions/runs/37988454278).
+The latter exercised fresh MSI/DEB installation, actual Echo reconciliation,
+service lifecycle, repair/reinstall where applicable, uninstall/data retention,
+and Fedora RPM lifecycle. Upload/download artifact IDs and digests matched.
+Final release checksum commands also passed against those downloaded packages;
+no tag or release was created to test the full release entry point.
+
 Local build, unit/process/filesystem tests, vet and race checks ran on Windows
 amd64 and Linux amd64 under WSL. Process cleanup, output limits, replacement of
 existing files, concurrent readers, private permissions, paths with spaces,
@@ -759,7 +767,7 @@ a completed GitHub Actions run.
 The opt-in Echo server test on Windows with DSC `3.3.0` passed for YAML/JSON
 configurations with no sidecar and with either inline parameter format in one
 initialized session. Other resources,
-real DSC execution on Linux, power-loss durability and other CPU architectures
+power-loss durability and other CPU architectures
 remain unverified. Linux foreground
 cannot contain descendants that deliberately leave its process group; jobs and
 cgroups cannot contain work delegated to already-running external services.

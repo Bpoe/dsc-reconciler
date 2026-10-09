@@ -806,6 +806,14 @@ startup or real DSC resource execution.
 The DEB lifecycle additionally passed on a disposable Ubuntu systemd host,
 including enable/start, stop/start, running/stopped/disabled upgrades, reinstall,
 remove/reinstall, removal/purge and data/permission preservation. Native RPM
-systemd startup, Windows service registration, host-shutdown delivery and other
+systemd startup, host-shutdown delivery and other
 DSC/resource compatibility still need disposable deployment validation.
 CI definitions are not evidence of an already completed CI run.
+
+The release refactor passed [native CI](https://github.com/Bpoe/dsc-reconciler/actions/runs/37988454033)
+and [fresh-install integration](https://github.com/Bpoe/dsc-reconciler/actions/runs/37988454278),
+including the current PATH-based MSI and actual Echo reconciliation on Windows
+and Ubuntu. The integration run downloaded the same artifact IDs/digests it
+uploaded. Final checksum/asset collection was also exercised against those
+packages without creating a release. Automated upgrades, RPM systemd startup,
+and the end-to-end tag-triggered draft creation remain outside that evidence.
