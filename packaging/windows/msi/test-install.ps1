@@ -337,11 +337,15 @@ try {
     Write-Output "MSI prerequisite, install, recovery, repair, reinstall, and uninstall passed. Logs: $logDirectory"
 }
 finally {
-    Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = $started } -ErrorAction Continue |
-        Where-Object ProviderName -eq 'dscd' |
-        Format-List TimeCreated, Id, Message | Out-File (Join-Path $logDirectory 'events.log')
-    if ($installedMsi) {
-        Invoke-Msi @('/x', "`"$installedMsi`"") 'cleanup-uninstall'
+    try {
+        Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = $started } -ErrorAction Continue |
+            Where-Object ProviderName -eq 'dscd' |
+            Format-List TimeCreated, Id, Message | Out-File (Join-Path $logDirectory 'events.log')
+    }
+    finally {
+        if ($installedMsi) {
+            Invoke-Msi @('/x', "`"$installedMsi`"") 'cleanup-uninstall'
+        }
     }
 
     # Logs and retained data are intentionally left on this disposable machine.
