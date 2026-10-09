@@ -48,6 +48,13 @@ func (w *fakeWriter) Write(ctx context.Context, result dsc.Result) error {
 
 func logger() *slog.Logger { return slog.New(slog.NewJSONHandler(io.Discard, nil)) }
 
+func withoutWatcher(r *Reconciler) *Reconciler {
+	r.watch = func() (eventSource, error) {
+		return eventSource{}, errors.New("watcher unavailable in periodic-only test")
+	}
+	return r
+}
+
 func input(t *testing.T, dir, name string) {
 	t.Helper()
 	writeInput(t, dir, name, `{"resources":[]}`)
@@ -196,7 +203,7 @@ func TestRunDelayAfterPass(t *testing.T) {
 				done := make(chan struct{})
 				start := time.Now()
 				go func() {
-					New(dir, interval, client.start, writer, logger()).Run(ctx)
+					withoutWatcher(New(dir, interval, client.start, writer, logger())).Run(ctx)
 					close(done)
 				}()
 				synctest.Wait()
@@ -270,7 +277,7 @@ func TestRunCancellationAfterPass(t *testing.T) {
 				}}
 				done := make(chan struct{})
 				go func() {
-					New(dir, interval, client.start, writer, logger()).Run(ctx)
+					withoutWatcher(New(dir, interval, client.start, writer, logger())).Run(ctx)
 					close(done)
 				}()
 				synctest.Wait()
@@ -317,7 +324,7 @@ func TestRunRetriesPassFailureAfterInterval(t *testing.T) {
 			calls <- struct{}{}
 			return dsc.Result{Configuration: filepath.Base(input.Configuration), Outcome: "succeeded"}
 		}}
-		go New(dir, interval, client.start, &fakeWriter{}, logger()).Run(ctx)
+		go withoutWatcher(New(dir, interval, client.start, &fakeWriter{}, logger())).Run(ctx)
 		synctest.Wait()
 		if len(calls) != 0 {
 			t.Fatal("executed a document in an unreadable directory")

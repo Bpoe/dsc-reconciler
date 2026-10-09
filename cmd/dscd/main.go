@@ -1,4 +1,4 @@
-// dscd periodically applies local DSC documents and publishes their latest results.
+// dscd reconciles local DSC documents periodically and on input changes.
 package main
 
 import (
