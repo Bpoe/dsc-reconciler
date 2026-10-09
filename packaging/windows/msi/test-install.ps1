@@ -3,6 +3,9 @@
 param(
     [Parameter(Mandatory)][string] $MsiPath,
     [string] $UpgradeMsiPath,
+    [string] $Version,
+    [string] $ArchivePath,
+    [switch] $ProvisionDSC,
     [switch] $Disposable
 )
 
@@ -20,6 +23,29 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 $MsiPath = (Resolve-Path -LiteralPath $MsiPath).Path
 if ($UpgradeMsiPath) {
     $UpgradeMsiPath = (Resolve-Path -LiteralPath $UpgradeMsiPath).Path
+}
+
+if ($ProvisionDSC) {
+    $dscRoot = Join-Path $env:ProgramFiles 'DSC smoke test'
+    $archive = Join-Path ([IO.Path]::GetTempPath()) 'dsc.zip'
+    Invoke-WebRequest -Uri 'https://github.com/PowerShell/DSC/releases/download/v3.3.0/DSC-3.3.0-x86_64-pc-windows-msvc.zip' `
+        -OutFile $archive
+    Expand-Archive -LiteralPath $archive -DestinationPath $dscRoot
+    $dsc = Join-Path $dscRoot 'dsc.exe'
+    & $dsc --version
+    if ($LASTEXITCODE -ne 0) {
+        throw 'DSC prerequisite does not run.'
+    }
+
+    # SCM retains its boot-time PATH; use the existing disposable-runner fixture.
+    $pathDirectory = Join-Path $env:ProgramFiles 'PowerShell\7'
+    $machinePaths = [Environment]::GetEnvironmentVariable('PATH', 'Machine').Split(';') |
+        ForEach-Object { [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') }
+    if ($pathDirectory -notin $machinePaths) {
+        throw 'PowerShell 7 must already be on the image machine PATH.'
+    }
+
+    New-Item -ItemType SymbolicLink -Path (Join-Path $pathDirectory 'dsc.exe') -Target $dsc | Out-Null
 }
 
 # Check only the machine PATH, excluding interactive-user executable aliases.
@@ -62,6 +88,17 @@ New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 $installedMsi = $null
 $currentMsi = $MsiPath
 $started = Get-Date
+$expectedHash = $null
+if ($ArchivePath) {
+    if (-not $Version) {
+        throw 'ArchivePath requires Version.'
+    }
+
+    $archiveDirectory = Join-Path $logDirectory 'archive'
+    Expand-Archive -LiteralPath $ArchivePath -DestinationPath $archiveDirectory
+    $archiveBinary = Join-Path $archiveDirectory "dscd-$Version-windows-amd64\bin\dscd.exe"
+    $expectedHash = (Get-FileHash -LiteralPath $archiveBinary -Algorithm SHA256).Hash
+}
 
 function Assert([bool] $Condition, [string] $Message) {
     if (-not $Condition) {
@@ -102,6 +139,14 @@ function Assert-Installed {
     Assert (Test-Path -LiteralPath $binary -PathType Leaf) 'installed executable'
     Assert (Test-Path -LiteralPath $license -PathType Leaf) 'installed MIT license'
     Assert ((Get-Content -Raw -LiteralPath $license).StartsWith('MIT License')) 'repository MIT notice'
+    if ($Version -and $currentMsi -eq $MsiPath) {
+        $reportedVersion = & $binary --version
+        Assert ($LASTEXITCODE -eq 0 -and $reportedVersion -ceq "dscd $Version") 'installed release version'
+        if ($expectedHash) {
+            Assert ((Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash -ceq $expectedHash) 'MSI and ZIP contain the same executable'
+        }
+    }
+
     $service = Get-Service dscd
     try {
         $service.WaitForStatus('Running', [timespan]::FromSeconds(30))
@@ -141,6 +186,8 @@ function Assert-Uninstalled {
     Assert (-not (Test-Path $settingsKey)) 'MSI settings removed'
     Assert ((Get-Content -Raw -LiteralPath (Join-Path $config 'retained.txt')) -ceq 'configuration marker') 'configuration data preserved'
     Assert ((Get-Content -Raw -LiteralPath (Join-Path $results 'retained.txt')) -ceq 'result marker') 'result data preserved'
+    Assert (Test-Path -LiteralPath (Join-Path $config 'package-smoke.json')) 'reconciled configuration preserved'
+    Assert (Test-Path -LiteralPath (Join-Path $results 'package-smoke.json.result.json')) 'DSC result preserved'
     foreach ($directory in @($data, $config, $results)) {
         Assert-ACL $directory
     }
@@ -148,10 +195,41 @@ function Assert-Uninstalled {
     Assert (Test-Path -LiteralPath $dscExecutable) 'DSC left installed'
 }
 
+function Assert-Reconciliation {
+    $service = Get-Service dscd
+    try {
+        Stop-Service dscd
+        $service.WaitForStatus('Stopped', [timespan]::FromSeconds(40))
+    }
+    finally {
+        $service.Dispose()
+    }
+
+    $resultPath = Join-Path $results 'package-smoke.json.result.json'
+    if (Test-Path -LiteralPath $resultPath) {
+        Remove-Item -LiteralPath $resultPath
+    }
+
+    $document = '{"$schema":"https://aka.ms/dsc/schemas/v3/bundled/config/document.json","resources":[{"name":"Package smoke","type":"Microsoft.DSC.Debug/Echo","properties":{"output":"dscd package smoke"}}]}'
+    [IO.File]::WriteAllText((Join-Path $config 'package-smoke.json'), $document)
+    Start-Service dscd
+    $deadline = [Diagnostics.Stopwatch]::StartNew()
+    while (-not (Test-Path -LiteralPath $resultPath) -and $deadline.Elapsed.TotalSeconds -lt 60) {
+        Start-Sleep -Milliseconds 500
+    }
+
+    Assert (Test-Path -LiteralPath $resultPath) 'reconciliation produced a fresh result'
+    $result = Get-Content -Raw -LiteralPath $resultPath | ConvertFrom-Json
+    Assert ($result.configuration -ceq 'package-smoke.json' -and $result.outcome -ceq 'succeeded') 'successful DSC reconciliation'
+    Assert ($result.dscResult.hadErrors -eq $false -and $result.dscResult.results.Count -eq 1) 'one successful resource'
+    Assert ($result.dscResult.results[0].result.afterState.output -ceq 'dscd package smoke') 'actual DSC Echo execution'
+}
+
 try {
     Invoke-Msi @('/i', "`"$MsiPath`"") 'install'
     $installedMsi = $MsiPath
     Assert-Installed
+    Assert-Reconciliation
     $service = Get-Service dscd
     try {
         Stop-Service dscd
@@ -225,21 +303,7 @@ try {
         }
         [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($productInspector)
         Assert ($versions[1] -gt $versions[0] -and $codes[1] -ne $codes[0]) 'upgrade requires higher version and new ProductCode'
-        # PE overlay bytes are ignored by Windows. A unique old-payload marker
-        # proves replacement even when both test MSIs were built from one binary.
-        Stop-Service dscd
-        $service = Get-Service dscd
-        try {
-            $service.WaitForStatus('Stopped', [timespan]::FromSeconds(40))
-        }
-        finally {
-            $service.Dispose()
-        }
-
-        [IO.File]::AppendAllText($binary, "MSI upgrade replacement probe $([guid]::NewGuid())")
         $oldFingerprint = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash
-        Start-Service dscd
-        Assert-Installed
         # Upgrades continue using the service's machine PATH.
         Invoke-Msi @('/i', "`"$UpgradeMsiPath`"") 'upgrade'
         $installedMsi = $UpgradeMsiPath
@@ -251,6 +315,7 @@ try {
         Invoke-Msi @('/i', "`"$MsiPath`"") 'downgrade-rejected' 1603
         Assert-Installed
         Write-Output 'MSI upgrade, PATH-based DSC lookup, data preservation, and downgrade rejection passed.'
+        Assert-Reconciliation
     }
     else {
         Write-Output 'Upgrade tests skipped: supply -UpgradeMsiPath to enable them.'
@@ -272,6 +337,9 @@ try {
     Write-Output "MSI prerequisite, install, recovery, repair, reinstall, and uninstall passed. Logs: $logDirectory"
 }
 finally {
+    Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = $started } -ErrorAction Continue |
+        Where-Object ProviderName -eq 'dscd' |
+        Format-List TimeCreated, Id, Message | Out-File (Join-Path $logDirectory 'events.log')
     if ($installedMsi) {
         Invoke-Msi @('/x', "`"$installedMsi`"") 'cleanup-uninstall'
     }

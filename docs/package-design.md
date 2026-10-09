@@ -1,3 +1,7 @@
+> Historical implementation brief. Its release workflow and RC requirements are
+> superseded by the [current packaging/release contract](design.md#packaging-and-operational-limits)
+> and [release instructions](../README.md#releases).
+
 Implement native Linux .deb and .rpm packages for the dsc-reconciler project.
 
 The goal is to make deploying dscd to a Linux machine as easy as installing a standard OS package. Installing the package should deploy the executable, configure systemd, create the necessary directories, and start the service.

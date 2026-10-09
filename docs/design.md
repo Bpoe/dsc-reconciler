@@ -96,7 +96,7 @@ or start reconciliation. Help and parse diagnostics remain on stderr.
 Output-write failures return a nonzero exit.
 Unstamped builds report `dscd dev`. Release builds set `main.version` using
 `go build -ldflags "-X main.version=<release tag>"`, preserving the complete
-`vX.Y.Z` or `vX.Y.Z-rc.N` tag in archives and native packages, independently of
+stable `vX.Y.Z` tag in archives and native packages, independently of
 package-manager version mappings. The release MSI uses the prebuilt, stamped
 Windows executable; it does not set the executable's CLI version itself.
 
@@ -610,17 +610,26 @@ stderr; SCM sends JSON messages to that source (Event ID 1, informational transp
 the JSON `level` records error severity). Logs are not stored in result files.
 See [README.md](../README.md) for installation, stop, removal and log access.
 
-Release candidates are built from a single selected revision by the manually
-triggered `release.yaml` workflow. Native Linux and Windows amd64 jobs test,
-build and package the daemon with platform service assets and the MIT license.
-Only after both jobs succeed does the workflow tag that revision and create a
-draft pre-release with both archives, the Windows MSI and SHA-256 checksums
-covering every release artifact. Publishing remains
-an explicit review step; release tags are not reused. DSC and its resources are
-separate prerequisites, not bundled release dependencies.
-The Linux job also builds and inspects native packages; checksums cover both
-archives, both Linux packages and the Windows MSI. Release tag `vX.Y.Z-rc.N` maps to native version
-`X.Y.Z~rc.N` (RPM release `1`), sorting before stable `X.Y.Z`.
+Pushing a stable `vX.Y.Z` tag triggers `release.yaml`. It validates the existing
+tag, resolves its exact commit, requires that commit to belong to `main`, and
+rejects an existing draft or release. RC tags are unsupported. The workflow never
+creates/moves tags and never automatically publishes a release.
+
+Release calls reusable `ci.yaml` for native source/module/race checks and package
+build/inspection, then reusable `service-integration.yaml` for mandatory
+installation tests. Each platform builds one stamped executable for all its
+formats. Named Actions artifacts carry the final payloads and their SHA-256
+checksums within the invoking workflow run. Integration downloads these exact
+packages, without rebuilding. The draft job downloads the same files, verifies
+the checksums, and combines the platform checksum lists into `SHA256SUMS`.
+There is no custom bundle/manifest format or external artifact store.
+
+Only successful checks permit a draft normal release containing the two
+archives, Windows MSI, DEB/RPM and checksums. Notes identify the version and
+commit. Publication is a manual review step. Retrying builds requires rerunning
+integration; existing releases are not overwritten. See the README for retries.
+DSC and its resources remain separate prerequisites. Stable tags map to native
+Linux version `X.Y.Z`, with RPM release `1`.
 Native packages contain the executable, unit and license, not development
 sources. Linux ARM64 packages and package feeds are not part of this release.
 
@@ -687,16 +696,13 @@ but leaves data directories, documents, results, DSC and reconciled machine
 state intact. Ordinary MSI repair restores package-owned resources and never
 ships or replaces configuration documents.
 
-Release tags map deterministically to MSI's three-field ProductVersion:
-`vM.m.p-rc.N` becomes `M.m.(100*p+N)`, and `vM.m.p` becomes
-`M.m.(100*p+99)`. Major and minor must be 0..255, patch 0..654, and candidate
-number 1..98. Unsupported suffixes, leading zeros and out-of-range fields fail
-the build rather than colliding. For example, `v0.0.1-rc.1` is `0.0.101`,
-`v0.0.1-rc.2` is `0.0.102`, and `v0.0.1` is `0.0.199`.
-This preserves ordering into the next patch/minor/major; publish intended
-upgrades in increasing release order. The full tag remains in artifact names
-and human-readable package metadata. Release workflows still create drafts
-marked pre-release, even when a stable-form tag is selected.
+Stable release tags preserve the existing MSI three-field ProductVersion
+mapping: `vM.m.p` becomes `M.m.(100*p+99)`. Major and minor must be 0..255 and
+patch 0..654. Suffixes (including RCs), leading zeros and out-of-range fields fail
+validation. For example, `v0.0.1` remains `0.0.199`, not `0.0.1`; removing RC
+support must not renumber existing stable versions. Publish intended upgrades
+in increasing release order. The full tag remains in artifact names and
+human-readable package metadata. All new releases are drafts, not prereleases.
 
 The WiX SDK and Util extension versions are pinned only in `dscd.wixproj`;
 no Go source compilation happens inside the installer project. The packaging
@@ -718,12 +724,12 @@ are not target-machine prerequisites. Review WiX's
 The project records acceptance for automated builds with
 `<AcceptEula>wix7</AcceptEula>`; WiX enforces EULA acceptance without a custom
 script switch or guard.
-Ordinary CI and release builds inspect the MSI but never install it.
-The manual `service-integration.yaml` workflow installs it on a disposable
-Windows runner with DSC 3.3.0 visible through the machine PATH and an
-empty input directory, verifies SCM, ACLs and Event Log behavior, cycles the
-service and uninstalls while checking data retention. MSI logs are retained as
-workflow artifacts. Defining those checks is not evidence they have run;
+Ordinary CI inspects the MSI without installing it. Release calls
+`service-integration.yaml` to install the exact uploaded MSI on a disposable
+Windows runner with DSC 3.3.0 visible through the machine PATH. The test verifies
+SCM, ACLs, Event Log, recovery, real Echo reconciliation, repair/reinstall, and
+uninstall/data retention. MSI and Event Log diagnostics are retained as workflow
+artifacts. Defining those checks is not evidence they have run;
 actual install/upgrade/shutdown behavior must be reported separately.
 The runner exposes the extracted DSC executable through a symlink in an existing
 machine PATH directory containing spaces, avoiding reliance on a newly edited
@@ -767,13 +773,19 @@ opt-in and must run only in a disposable, explicitly configured environment.
 
 Use the build, test, vet, formatting, and race checks specified in
 [AGENTS.md](../AGENTS.md). `ci.yaml` runs these checks natively on Linux and Windows
-for pushes and pull requests. Service-registration smoke tests run separately
-through `service-integration.yaml`, triggered manually with `workflow_dispatch`,
-only on disposable hosted runners.
-The Linux integration job installs Microsoft's DSC package and exercises native
-DEB install, stop/start, running/stopped upgrades, reinstall, removal and purge
-with real systemd. A separate Fedora image exercises RPM installation/lifecycle
-without a systemd manager; it does not certify RPM service startup.
+for branch pushes and pull requests, and is reused by release runs.
+Service tests run separately through `service-integration.yaml` on disposable
+hosted runners: release calls it with uploaded packages, while manual dispatch
+builds its selected ref using a test-only stable version. Both paths download
+named artifacts in the current invoking run and verify checksums before testing.
+The Linux job installs Microsoft's DSC package and exercises native DEB install,
+actual Echo reconciliation, stop/start, reinstall, removal and purge with real
+systemd. That job also uses a Fedora container for RPM lifecycle without systemd;
+it does not certify RPM service startup.
+Automated upgrade testing and previous-release discovery are deferred. Existing
+scripts retain explicit-package upgrade checks, including running/stopped/
+disabled Linux units and Windows downgrade rejection; no synthetic baseline
+packages are built by workflows.
 Normal tests cover the SCM handler using in-memory control/status channels;
 they do not register a service, reboot a machine, invoke real DSC, or change
 host desired state. SCM stop-during-startup, Stop, Shutdown, interrogation,

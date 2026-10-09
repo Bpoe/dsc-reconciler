@@ -2,121 +2,145 @@ name: service-integration
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: Test-only stable version (does not create a release)
+        type: string
+        required: true
+        default: v0.0.0
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      commit:
+        type: string
+        required: true
 
 permissions:
   contents: read
 
+env:
+  VERSION: ${{ inputs.version }}
+
 jobs:
   service:
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            platform: linux
+          - os: windows-latest
+            platform: windows
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.commit || github.sha }}
+          persist-credentials: false
+      - name: Validate version
+        shell: pwsh
+        run: .\packaging\windows\msi\version.ps1 -Version $env:VERSION
+      # Only manual runs build. Release calls use the caller's uploaded packages.
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        if: github.event_name == 'workflow_dispatch'
         with:
           go-version-file: go.mod
           cache: true
-      - name: Windows MSI integration (disposable runner only)
-        if: runner.os == 'Windows'
-        env:
-          CGO_ENABLED: '0'
+      - name: Build and inspect manual Windows packages
+        if: github.event_name == 'workflow_dispatch' && runner.os == 'Windows'
         shell: pwsh
         run: |
-          go build -o bin\dscd.exe .\cmd\dscd
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          .\packaging\windows\msi\build.ps1 -Version v0.0.1-rc.1 `
-              -BinaryPath .\bin\dscd.exe -OutputDirectory "$env:RUNNER_TEMP\dscd-msi"
-          .\packaging\windows\msi\build.ps1 -Version v0.0.1-rc.2 `
-              -BinaryPath .\bin\dscd.exe -OutputDirectory "$env:RUNNER_TEMP\dscd-msi"
-          foreach ($version in @('v0.0.1-rc.1', 'v0.0.1-rc.2')) {
-            .\packaging\windows\msi\inspect.ps1 `
-                -MsiPath "$env:RUNNER_TEMP\dscd-msi\dscd-$version-windows-amd64.msi" -Version $version
-          }
-          $dscRoot = Join-Path $env:ProgramFiles 'DSC smoke test'
-          $archive = Join-Path $env:RUNNER_TEMP 'dsc.zip'
-          Invoke-WebRequest -Uri 'https://github.com/PowerShell/DSC/releases/download/v3.3.0/DSC-3.3.0-x86_64-pc-windows-msvc.zip' `
-              -OutFile $archive
-          Expand-Archive -LiteralPath $archive -DestinationPath $dscRoot
-          $dsc = Join-Path $dscRoot 'dsc.exe'
-          & $dsc --version
-          if ($LASTEXITCODE -ne 0) { throw 'DSC prerequisite does not run.' }
-          # SCM can retain its boot-time PATH. On this disposable hosted image,
-          # expose the fixture in an existing machine PATH directory with spaces,
-          # rather than relying on GITHUB_PATH or a just-edited registry value.
-          $pathDirectory = Join-Path $env:ProgramFiles 'PowerShell\7'
-          $machinePaths = [Environment]::GetEnvironmentVariable('PATH', 'Machine').Split(';') |
-              ForEach-Object { [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') }
-          if ($pathDirectory -notin $machinePaths) { throw 'PowerShell 7 must already be on the image machine PATH.' }
-          New-Item -ItemType SymbolicLink -Path (Join-Path $pathDirectory 'dsc.exe') -Target $dsc | Out-Null
-          .\packaging\windows\msi\test-install.ps1 `
-              -MsiPath "$env:RUNNER_TEMP\dscd-msi\dscd-v0.0.1-rc.1-windows-amd64.msi" `
-              -UpgradeMsiPath "$env:RUNNER_TEMP\dscd-msi\dscd-v0.0.1-rc.2-windows-amd64.msi" `
-              -Disposable
-      - name: Preserve Windows MSI logs
-        if: always() && runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-msi-logs
-          path: packaging/windows/msi/test-output/**/*.log
-          if-no-files-found: ignore
-      - name: Build Linux packages (disposable runner only)
-        if: runner.os == 'Linux'
+          .\packaging\windows\build.ps1 -Version $env:VERSION -OutputDirectory "$env:RUNNER_TEMP\dist"
+          .\packaging\windows\msi\inspect.ps1 `
+              -MsiPath "$env:RUNNER_TEMP\dist\dscd-$env:VERSION-windows-amd64.msi" -Version $env:VERSION
+      - name: Build and inspect manual Linux packages
+        if: github.event_name == 'workflow_dispatch' && runner.os == 'Linux'
         shell: bash
         run: |
-          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y rpm
           GOBIN="$RUNNER_TEMP/package-tools" go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
           export PATH="$RUNNER_TEMP/package-tools:$PATH"
-          for version in v0.0.0-rc.1 v0.0.0; do
-            VERSION="$version" bash packaging/linux/build.sh "$RUNNER_TEMP/packages"
-            VERSION="$version" bash packaging/linux/validate.sh "$RUNNER_TEMP/packages"
-          done
-      - name: Debian package lifecycle with real systemd
+          bash packaging/linux/build.sh "$RUNNER_TEMP/dist"
+          bash packaging/linux/validate.sh "$RUNNER_TEMP/dist"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: dscd-${{ matrix.platform }}-amd64
+          path: ${{ runner.temp }}/dist/*
+          if-no-files-found: error
+          overwrite: true
+      # No token/run-id override: reusable calls download from the invoking run.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dscd-${{ matrix.platform }}-amd64
+          path: ${{ runner.temp }}/packages
+      - name: Verify downloaded packages
+        shell: bash
+        working-directory: ${{ runner.temp }}/packages
+        run: |
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            expected=("dscd-$VERSION-windows-amd64.msi" "dscd-$VERSION-windows-amd64.zip")
+          else
+            expected=("dscd-$VERSION-linux-amd64.tar.gz" "dscd_${VERSION#v}_amd64.deb" "dscd-${VERSION#v}-1.x86_64.rpm")
+          fi
+          diff <(printf '%s\n' "${expected[@]}" SHA256SUMS | sort) <(find . -type f -printf '%P\n' | sort)
+          diff <(printf '%s\n' "${expected[@]}" | sort) <(cut -c 67- SHA256SUMS | sort)
+          sha256sum --check --strict SHA256SUMS
+          echo "Verified release payloads from invoking run $GITHUB_RUN_ID." >> "$GITHUB_STEP_SUMMARY"
+      - name: Windows MSI lifecycle and reconciliation
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\packaging\windows\msi\test-install.ps1 -Disposable -ProvisionDSC `
+              -MsiPath "$env:RUNNER_TEMP\packages\dscd-$env:VERSION-windows-amd64.msi" `
+              -Version $env:VERSION -ArchivePath "$env:RUNNER_TEMP\packages\dscd-$env:VERSION-windows-amd64.zip"
+      - name: Debian lifecycle and reconciliation with real systemd
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          set -euo pipefail
           curl --fail --location --output "$RUNNER_TEMP/dsc.deb" \
             https://github.com/PowerShell/DSC/releases/download/v3.3.0/dsc_3.3.0-1_amd64.deb
           echo "af949cd0dd27a573fd74c926edf57b9d2136063f361f11af88738e2df32487c8  $RUNNER_TEMP/dsc.deb" | sha256sum --check
           sudo apt-get install -y "$RUNNER_TEMP/dsc.deb"
-          sudo bash packaging/linux/test-install.sh \
-            "$RUNNER_TEMP/packages/dscd_0.0.0~rc.1_amd64.deb" \
-            "$RUNNER_TEMP/packages/dscd_0.0.0_amd64.deb"
-      - uses: actions/upload-artifact@v4
+          sudo env VERSION="$VERSION" bash packaging/linux/test-install.sh \
+            "$RUNNER_TEMP/packages/dscd_${VERSION#v}_amd64.deb"
+      - name: Fedora RPM lifecycle without systemd
         if: runner.os == 'Linux'
-        with:
-          name: linux-install-packages
-          path: ${{ runner.temp }}/packages/*.rpm
-          if-no-files-found: error
-
-  rpm-install:
-    needs: service
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: linux-install-packages
-          path: ${{ runner.temp }}/packages
-      - name: RPM package lifecycle without systemd (image construction)
         shell: bash
         run: |
-          set -euo pipefail
-          curl --fail --location --output "$RUNNER_TEMP/packages/dsc.rpm" \
+          curl --fail --location --output "$RUNNER_TEMP/dsc.rpm" \
             https://github.com/PowerShell/DSC/releases/download/v3.3.0/dsc-3.3.0-1.x86_64.rpm
-          echo "09ac4c3c5aeaaec96cdb128a2fe55cd022a31b5ae67d0c77d01e241761708c47  $RUNNER_TEMP/packages/dsc.rpm" | sha256sum --check
-          docker run --rm \
+          echo "09ac4c3c5aeaaec96cdb128a2fe55cd022a31b5ae67d0c77d01e241761708c47  $RUNNER_TEMP/dsc.rpm" | sha256sum --check
+          docker run --rm -e VERSION \
+            -v "$RUNNER_TEMP/dsc.rpm:/dsc.rpm:ro" \
             -v "$RUNNER_TEMP/packages:/packages:ro" \
             -v "$GITHUB_WORKSPACE/packaging/linux:/tests:ro" \
             fedora:43 bash -euc '
-              dnf install -y /packages/dsc.rpm
-              bash /tests/test-install.sh \
-                /packages/dscd-0.0.0~rc.1-1.x86_64.rpm \
-                /packages/dscd-0.0.0-1.x86_64.rpm
-            '
+              dnf install -y /dsc.rpm
+              bash /tests/test-install.sh "/packages/dscd-${VERSION#v}-1.x86_64.rpm"
+            ' 2>&1 | tee "$RUNNER_TEMP/rpm-install.log"
+      - name: Collect Linux diagnostics
+        if: always() && runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo journalctl -u dscd --no-pager > "$RUNNER_TEMP/dscd-journal.log"
+          sudo cp /var/log/apt/term.log "$RUNNER_TEMP/apt-install.log"
+          sudo chmod a+r "$RUNNER_TEMP/apt-install.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: ${{ matrix.platform }}-install-logs
+          path: |
+            packaging/windows/msi/test-output/**/*.log
+            ${{ runner.temp }}/*-install.log
+            ${{ runner.temp }}/dscd-journal.log
+          if-no-files-found: ignore
+          overwrite: true
+      - name: Record validation scope
+        shell: bash
+        run: |
+          echo "Fresh-install, lifecycle and uninstall checks passed. Automated upgrade testing is deferred; no synthetic baseline was built." >> "$GITHUB_STEP_SUMMARY"

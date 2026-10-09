@@ -2,28 +2,52 @@ name: build-and-test
 
 on:
   push:
+    branches: ['**']
   pull_request:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      commit:
+        required: true
+        type: string
 
 permissions:
   contents: read
+
+env:
+  VERSION: ${{ inputs.version || 'v0.0.0' }}
 
 jobs:
   check:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            platform: linux
+          - os: windows-latest
+            platform: windows
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.commit || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: true
+      - name: Validate version mapping
+        shell: pwsh
+        run: |
+          .\packaging\windows\msi\version.ps1 -Version $env:VERSION
+          .\packaging\windows\msi\test-version.ps1
       - name: Install Windows race compiler
         id: msys2
         if: runner.os == 'Windows'
-        uses: msys2/setup-msys2@v2
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
         with:
           msystem: UCRT64
           install: mingw-w64-ucrt-x86_64-gcc
@@ -33,6 +57,8 @@ jobs:
         run: |
           "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin" >> $env:GITHUB_PATH
           "CGO_ENABLED=1" >> $env:GITHUB_ENV
+      - name: Verify dependencies
+        run: go mod verify
       - name: Build
         run: go build ./...
       - name: Test
@@ -47,19 +73,13 @@ jobs:
           if ($unformatted.Count -ne 0) { $unformatted; throw 'Run gofmt on the files above.' }
       - name: Race
         run: go test -race ./...
-      - name: Build and inspect Windows MSI (no installation)
+      - name: Build and inspect Windows packages (no installation)
         if: runner.os == 'Windows'
-        env:
-          CGO_ENABLED: '0'
         shell: pwsh
         run: |
-          go build -o "$env:RUNNER_TEMP\dscd.exe" ./cmd/dscd
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          .\packaging\windows\msi\test-version.ps1
-          .\packaging\windows\msi\build.ps1 -Version v0.0.1-rc.1 `
-              -BinaryPath "$env:RUNNER_TEMP\dscd.exe" -OutputDirectory "$env:RUNNER_TEMP\dscd-msi"
+          .\packaging\windows\build.ps1 -Version $env:VERSION -OutputDirectory "$env:RUNNER_TEMP\dist"
           .\packaging\windows\msi\inspect.ps1 `
-              -MsiPath "$env:RUNNER_TEMP\dscd-msi\dscd-v0.0.1-rc.1-windows-amd64.msi" -Version v0.0.1-rc.1
+              -MsiPath "$env:RUNNER_TEMP\dist\dscd-$env:VERSION-windows-amd64.msi" -Version $env:VERSION
       - name: Install Linux packaging tools
         if: runner.os == 'Linux'
         shell: bash
@@ -71,8 +91,13 @@ jobs:
       - name: Build and inspect Linux packages (no installation)
         if: runner.os == 'Linux'
         shell: bash
-        env:
-          VERSION: v0.0.0-rc.1
         run: |
-          bash packaging/linux/build.sh "$RUNNER_TEMP/packages"
-          bash packaging/linux/validate.sh "$RUNNER_TEMP/packages"
+          bash packaging/linux/build.sh "$RUNNER_TEMP/dist"
+          bash packaging/linux/validate.sh "$RUNNER_TEMP/dist"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: inputs.commit != ''
+        with:
+          name: dscd-${{ matrix.platform }}-amd64
+          path: ${{ runner.temp }}/dist/*
+          if-no-files-found: error
+          overwrite: true

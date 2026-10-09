@@ -1,4 +1,4 @@
-.PHONY: build test vet fmt-check check race
+.PHONY: build test vet fmt-check verify check race
 
 build:
 	go build ./...
@@ -13,7 +13,10 @@ vet:
 fmt-check:
 	@test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
 
-check: build test vet fmt-check
+verify:
+	go mod verify
+
+check: verify build test vet fmt-check
 
 race:
 	go test -race ./...
