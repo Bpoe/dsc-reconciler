@@ -117,4 +117,4 @@ jobs:
           (cd dist && sha256sum --check --strict SHA256SUMS)
           gh release create "$VERSION" dist/*.tar.gz dist/*.zip dist/*.msi dist/*.deb dist/*.rpm dist/SHA256SUMS \
             --verify-tag --draft --title "dscd $VERSION" --generate-notes \
-            --notes "Version $VERSION, built from $COMMIT. These exact packages passed fresh-install, reconciliation, service lifecycle and uninstall checks on Windows and Ubuntu, and RPM lifecycle checks in Fedora without systemd. Automated upgrade testing is deferred. Microsoft DSC 3.3.0+ must be installed separately; Windows requires dsc.exe on the machine PATH visible to LocalSystem. Review this draft before publishing."
+            --notes "Version $VERSION, built from $COMMIT. These exact packages passed fresh-install, reconciliation, service lifecycle and uninstall checks on Windows and Ubuntu, and RPM lifecycle checks in Fedora without systemd. Automated upgrade testing is deferred. Windows MSI and ZIP include Microsoft DSC 3.3.0 and its upstream licenses; Linux requires the separately installed dsc package (3.3.0+). Review this draft before publishing."

@@ -79,7 +79,8 @@ jobs:
         run: |
           .\packaging\windows\build.ps1 -Version $env:RELEASE_VERSION -OutputDirectory "$env:RUNNER_TEMP\dist"
           .\packaging\windows\msi\inspect.ps1 `
-              -MsiPath "$env:RUNNER_TEMP\dist\dscd-$env:RELEASE_VERSION-windows-amd64.msi" -Version $env:RELEASE_VERSION
+              -MsiPath "$env:RUNNER_TEMP\dist\dscd-$env:RELEASE_VERSION-windows-amd64.msi" -Version $env:RELEASE_VERSION `
+              -ArchivePath "$env:RUNNER_TEMP\dist\dscd-$env:RELEASE_VERSION-windows-amd64.zip"
       - name: Install Linux packaging tools
         if: runner.os == 'Linux'
         shell: bash

@@ -77,7 +77,7 @@ The initial configuration uses the standard `flag` package:
 | `-config-dir` | `ConfigDir` | Linux: `/etc/dsc/config.d`; Windows: `%ProgramData%\dsc\config.d` | Directory containing DSC documents. |
 | `-results-dir` | `ResultsDir` | Linux: `/var/lib/dsc/results.d`; Windows: `%ProgramData%\dsc\results.d` | Directory containing latest execution results. |
 | `-interval` | `Interval` | `5m` | Delay after each completed full reconciliation pass; must be positive. Targeted work does not reset it. |
-| `-dsc-path` | `DSCPath` | `dsc` | Executable path or name to resolve at startup using PATH (and PATHEXT on Windows). |
+| `-dsc-path` | `DSCPath` | Windows: adjacent `dsc\dsc.exe`, then `dsc`; Linux: `dsc` | Explicit executable path or name overrides automatic selection. |
 | `-execution-timeout` | `ExecutionTimeout` | `15m` | Positive maximum duration of each configuration JSON-RPC request. |
 
 ```sh
@@ -717,9 +717,10 @@ Only successful checks permit a draft normal release containing the two
 archives, Windows MSI, DEB/RPM and checksums. Notes identify the version and
 commit. Publication is a manual review step. Retrying builds requires rerunning
 integration; existing releases are not overwritten. See the README for retries.
-DSC and its resources remain separate prerequisites. Stable tags map to native
+Windows packages bundle DSC 3.3.0 and its resources; Linux retains separate
+DSC prerequisites. Stable tags map to native
 Linux version `X.Y.Z`, with RPM release `1`.
-Native packages contain the executable, unit and license, not development
+Linux native packages contain the executable, unit and license, not development
 sources. Linux ARM64 packages and package feeds are not part of this release.
 
 ### Windows MSI
@@ -734,33 +735,53 @@ have protected inheritable DACLs permitting only SYSTEM and Administrators full 
 recursive permission changes to unrelated content are performed.
 The directories remain after uninstall, including when empty.
 
-Install Microsoft DSC 3.3.0 or later separately. Microsoft's
-[Windows installation documentation](https://learn.microsoft.com/en-us/powershell/dsc/install?view=dsc-3.0)
-and [3.3.0 release assets](https://github.com/PowerShell/DSC/releases/tag/v3.3.0)
-provide ZIP distributions as well as other installation methods. Add the DSC
-directory to the **machine/system PATH visible to LocalSystem** before installing
-or starting dscd. For example, extract the archive to `%ProgramFiles%\DSC` and add
-that directory to the system PATH. This is an operator choice, not an installer
-search location. An interactive user's PATH or per-user WinGet/Store executable
-alias is insufficient. Windows services may retain an older environment after
-PATH changes; reboot before installation/startup if needed. Operators must verify
-DSC 3.3.0+ and LocalSystem access to DSC/resources and protect PATH directories
-and resource files against untrusted writes.
+Windows MSI and ZIP include the complete official
+[DSC 3.3.0 Windows x64 ZIP](https://github.com/PowerShell/DSC/releases/tag/v3.3.0).
+`packaging/windows/build.ps1` pins the version and archive SHA-256, downloads
+once into a temporary packaging directory, verifies the checksum before extraction,
+and removes all downloaded/staged files in `finally`. Network and checksum failures
+fail packaging. The same staged executable and unmodified DSC tree feed both
+artifacts: `[ProgramFiles64Folder]dscd\dsc` in MSI, `bin\dsc` in ZIP.
+Every upstream file retains its relative name and directory, including licenses
+and attribution; these accompany dsc-reconciler's separate MIT `LICENSE`.
+The archive includes `NOTICE.txt` but omits the project's MIT `LICENSE`; the builder
+downloads that license from the same version-tagged source, verifies its separate
+pinned SHA-256 and installs it as `dsc\LICENSE`.
+No download occurs during installation.
 
-The MSI does not accept a DSC executable path, discover or validate DSC, persist
-its location, or modify PATH. It neither bundles nor downloads DSC. The daemon's
-existing startup validation resolves the default executable name `dsc` through
-the service process's PATH/PATHEXT. If resolution fails, the service fails to
-start and installation fails through native MSI service-start handling; there
-is no custom prerequisite launch condition or tailored MSI discovery error.
-An installation without DSC exceeded the smoke test's two-minute limit in native
-`StartServices`; do not depend on a prompt prerequisite rejection or bounded
-rollback time. Provision and verify the service environment before installation.
+To update the bundle, change the version and checksum constants in the Windows
+builder against the official release asset's published SHA-256 digest, update the documented pin,
+and run artifact inspection and disposable native integration tests.
+
+With no explicit `-dsc-path`, Windows checks `dsc\dsc.exe` relative to
+`os.Executable`, never the working directory, registry or a hardcoded install
+location. If absent, it resolves `dsc` through the service's PATH/PATHEXT.
+Explicit overrides (even the name `dsc`) bypass the bundle, and invalid overrides
+fail the existing startup validation without fallback. Linux resolution is unchanged.
+The MSI does not accept or persist an executable setting, search for external DSC
+or modify machine/user PATH. Independently installed DSC is not MSI-owned.
 Service, registry, directory and ACL operations remain declarative.
+
+DSC's shipped `resourcePath` settings allow environment overrides and append PATH.
+Its [3.3.0 release-branch discovery implementation](https://github.com/PowerShell/DSC/blob/ea572fa755dbd49fb52339043409fbd50a625600/lib/dsc-lib/src/discovery/command_discovery.rs#L138-L181)
+searches manifest directories nonrecursively, normally including its executable
+directory and PATH. The distribution's resource manifests are at its root;
+`psDscAdapter` contains supporting scripts/modules referenced by those manifests,
+not an additional manifest-search directory.
+For bundled execution, the Windows child PATH is prefixed with the bundle directory
+to find its resource executables while retaining inherited PATH locations.
+When inherited `DSC_RESOURCE_PATH` is present, DSC replaces PATH-based manifest
+discovery; retain the caller's full value/ordering and append the bundle directory
+to that child variable. Leave it absent otherwise. Preserve all other variables,
+including `PSModulePath`. Honor `DSC_RESTRICTED_PATH` unchanged without expanding
+either search variable, so intentional isolation remains authoritative.
+External executables bypass these adjustments. No global environment is modified.
+Custom resources/modules and PowerShell 7 remain operator-provided where needed,
+and must be accessible to LocalSystem for the service.
 
 Native service tables own `dscd`, display name `DSC Reconciliation Daemon`,
 automatic startup and LocalSystem identity. The command line supplies only
-`-config-dir` and `-results-dir`; the daemon's default `dsc` name, five-minute
+`-config-dir` and `-results-dir`; the daemon's bundled-runtime default, five-minute
 interval and fifteen-minute execution timeout remain authoritative.
 Full reconciliation starts immediately, then waits five minutes after each
 completed full pass, with targeted reconciliation on input changes between
@@ -778,11 +799,15 @@ Application source `dscd` and preserves Event ID 1 / JSON logging.
 
 Major upgrades use a stable UpgradeCode and a new ProductCode per package
 version, stop the service before replacement and restart it afterward.
-DSC must remain available on the service's machine PATH during upgrades and
-repair. Installation is transactional where Windows Installer
+`RemoveExistingProducts` runs after `InstallInitialize`, inside the transaction
+and before installing the new tree, so unversioned upstream manifests/scripts
+are replaced rather than retained by late-upgrade timestamp rules.
+Bundled DSC files are ordinary MSI-owned files with stable per-file components;
+repair restores missing files, upgrades replace the tree and remove retired files,
+and uninstall removes the bundle. Installation is transactional where Windows Installer
 supports rollback. No migration or alternate legacy layouts are supported.
 Uninstall stops and removes the service, executable and Event Log registration,
-but leaves data directories, documents, results, DSC and reconciled machine
+but leaves data directories, documents, results, independently installed DSC and reconciled machine
 state intact. Ordinary MSI repair restores package-owned resources and never
 ships or replaces configuration documents.
 
@@ -816,21 +841,16 @@ The project records acceptance for automated builds with
 script switch or guard.
 Ordinary CI inspects the MSI without installing it. Release calls
 `service-integration.yaml` to install the exact uploaded MSI on a disposable
-Windows runner with DSC 3.3.0 visible through the machine PATH. The test verifies
-SCM, ACLs, Event Log, recovery, real Echo reconciliation, repair/reinstall, and
+Windows runner without provisioning separate DSC. The test verifies the bundled
+version/resources, SCM, ACLs, Event Log, recovery, real Echo reconciliation,
+bundled-file repair, reinstall, and
 uninstall/data retention. MSI and Event Log diagnostics are retained as workflow
 artifacts. Defining those checks is not evidence they have run;
 actual install/upgrade/shutdown behavior must be reported separately.
-The runner exposes the extracted DSC executable through a symlink in an existing
-machine PATH directory containing spaces, avoiding reliance on a newly edited
-PATH reaching the already-running SCM. This is disposable test setup only;
-the MSI does not create that link or change the environment. The test also hides
-the fixture temporarily to verify a direct service restart fails with a DSC
-resolution error, then restores it before continuing the MSI lifecycle checks.
 The previous installer with explicit DSC paths passed native MSI checks in
 [service-integration run 37578288245](https://github.com/Bpoe/dsc-reconciler/actions/runs/37578288245),
 including executable replacement, repair, reinstall, uninstall and data retention.
-That historical run does not validate the current PATH-based installer. The same
+That historical run does not validate the bundled-runtime installer. The same
 run passed Linux systemd integration. Host-shutdown delivery and full draft-release
 execution were not tested by that workflow.
 
@@ -912,8 +932,9 @@ CI definitions are not evidence of an already completed CI run.
 
 The release refactor passed [native CI](https://github.com/Bpoe/dsc-reconciler/actions/runs/37988454033)
 and [fresh-install integration](https://github.com/Bpoe/dsc-reconciler/actions/runs/37988454278),
-including the current PATH-based MSI and actual Echo reconciliation on Windows
+including the then-current PATH-based MSI and actual Echo reconciliation on Windows
 and Ubuntu. The integration run downloaded the same artifact IDs/digests it
 uploaded. Final checksum/asset collection was also exercised against those
 packages without creating a release. Automated upgrades, RPM systemd startup,
 and the end-to-end tag-triggered draft creation remain outside that evidence.
+These historical runs do not validate the bundled-runtime packaging described above.
