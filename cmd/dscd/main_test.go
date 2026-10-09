@@ -96,9 +96,10 @@ func TestRealProcessPerPassAndRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			for name, text := range map[string]string{
-				"a.yaml": test.mode, "b.yaml": "test drift", "c.json": "success",
-				"b.dscd.json": `{"operation":"test"}`, "b.parameters.json": "private-sidecar-value",
-				"c.dscd.json": `{"operation":"set"}`,
+				"a.yaml":            fmt.Sprintf(`{"mode":%q,"resources":[]}`, test.mode),
+				"b.yaml":            `{"mode":"test drift","metadata":{"dscd":{"operation":"test","future":[null,true,{"secret":"PRIVATE-METADATA"}]}},"resources":[]}`,
+				"c.json":            `{"mode":"success","metadata":{"dscd":{"operation":"set"}},"resources":[]}`,
+				"b.parameters.json": "private-sidecar-value",
 			} {
 				if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0600); err != nil {
 					t.Fatal(err)
@@ -180,8 +181,8 @@ func TestRealProcessPerPassAndRecovery(t *testing.T) {
 				if test.servers == 1 && strings.Count(string(data), "stop ") != pass {
 					t.Fatalf("server didn't stop after pass: %s", data)
 				}
-				if strings.Contains(logs.String(), "private-sidecar-value") {
-					t.Fatal("JSON-RPC diagnostic leaked to routine logs")
+				if strings.Contains(logs.String(), "private-sidecar-value") || strings.Contains(logs.String(), "PRIVATE-METADATA") {
+					t.Fatal("input or JSON-RPC diagnostic leaked to routine logs")
 				}
 			}
 		})
@@ -238,7 +239,13 @@ func resultServer() int {
 			}})
 			continue
 		}
-		switch req.Params.Arguments.Configuration {
+		var document struct {
+			Mode string `json:"mode"`
+		}
+		if json.Unmarshal([]byte(req.Params.Arguments.Configuration), &document) != nil {
+			return 8
+		}
+		switch document.Mode {
 		case "invalid output":
 			fmt.Println("invalid JSON")
 			continue
@@ -253,8 +260,9 @@ func resultServer() int {
 			}
 		}
 		resourceResults := []any{}
-		if req.Params.Arguments.Configuration == "test drift" {
-			if req.Params.Arguments.Operation != dsc.OperationTest {
+		if document.Mode == "test drift" {
+			if req.Params.Arguments.Operation != dsc.OperationTest ||
+				req.Params.Arguments.Configuration != `{"mode":"test drift","metadata":{"dscd":{"operation":"test","future":[null,true,{"secret":"PRIVATE-METADATA"}]}},"resources":[]}` {
 				return 6
 			}
 			resourceResults = append(resourceResults, map[string]any{"result": map[string]any{"inDesiredState": false}})
@@ -279,8 +287,9 @@ func TestEndToEndPublicationAndContinuation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, data := range map[string]string{
-		"05-metadata.yaml": "opaque input", "05-metadata.dscd.json": `{"operation":"PRIVATE-METADATA"}`,
-		"10-failure.yaml": "invalid output", "20-success.json": "opaque input",
+		"05-metadata.yaml":           "metadata:\n  dscd:\n    operation: PRIVATE-METADATA\nresources: []\n",
+		"10-failure.yaml":            `{"mode":"invalid output","resources":[]}`,
+		"20-success.json":            `{"resources":[]}`,
 		"20-success.parameters.yaml": "private-sidecar-value",
 	} {
 		if err := os.WriteFile(filepath.Join(input, name), []byte(data), 0600); err != nil {
@@ -412,7 +421,7 @@ func TestServerInitializationFailurePublished(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"a.yaml", "b.json"} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("success"), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(`{"mode":"success","resources":[]}`), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}

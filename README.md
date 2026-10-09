@@ -7,13 +7,13 @@ and records the results. Optional per-configuration metadata can select audit-on
 `test` execution instead.
 
 The project is intentionally simple. `dscd` does not own configuration authoring,
-composition, or parameter processing; it treats DSC configuration and parameter files
-as inputs and delegates their interpretation and execution to DSC. This makes it
-useful both as a standalone local desired-state reconciler and as a building block
+composition, or parameter processing; it inspects only document syntax and its
+embedded metadata, delegating resource interpretation and execution to DSC. This
+makes it useful both as a standalone local desired-state reconciler and as a building block
 for higher-level configuration control planes.
 
-There is no server, remote configuration store, watcher, DSC document parser or
-resource model. `dscd` parses only its own metadata; DSC owns testing and applying
+There is no server, remote configuration store, watcher or DSC resource model.
+`dscd` extracts only its own metadata; DSC owns testing and applying
 configurations. See the
 [design and result contract](docs/design.md) and [contributor guidance](AGENTS.md).
 
@@ -61,15 +61,22 @@ the input directory created by the installer:
 - **Windows:** `%ProgramData%\dsc\config.d`
 
 **Adding a configuration authorizes DSC to change the machine by default.**
-For audit-only operation, publish a matching metadata file first. For example,
-before adding `web.yaml`, create `web.dscd.json` in the same directory:
+For audit-only operation, include `metadata.dscd.operation: test` in the
+configuration itself. For example, publish `web.yaml`:
 
-```json
-{
-  "operation": "test"
-}
+```yaml
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+metadata:
+  dscd:
+    operation: test
+resources:
+  - name: Example
+    type: Microsoft.DSC.Debug/Echo
+    properties:
+      output: Hello
 ```
-To enforce desired state instead, use `{"operation":"set"}` or omit the metadata.
+To enforce desired state instead, use `operation: set` or omit the metadata.
+JSON supports the same [embedded metadata](#per-configuration-metadata).
 
 ### Read results
 Each configuration has a latest-result file. For `web.yaml`, read:
@@ -108,8 +115,10 @@ An opt-in Echo test exercised 3.3.0 on Windows; this does not certify all
 resources. Older CLI-only DSC versions, including `3.2.0-preview.14`, are no longer
 supported. There is no per-document process fallback.
 
-The sole Go dependency, `golang.org/x/sys`, provides Windows Job Objects, SCM,
-Event Log, ACLs and native file replacement. Linux uses the standard library.
+`golang.org/x/sys` provides Windows Job Objects, SCM, Event Log, ACLs and native
+file replacement. `go.yaml.in/yaml/v3` provides YAML syntax parsing and embedded
+metadata extraction without modeling DSC resources; JSON uses the standard
+library's `encoding/json`.
 
 ## Build and check
 
@@ -232,9 +241,9 @@ proceeding with a new candidate version; reruns do not overwrite existing releas
 ## Foreground execution
 
 Start with an empty directory if you only want to inspect startup/shutdown.
-**No metadata file means `set`: adding a DSC document normally authorizes DSC to
-enforce its desired state and modify the machine.** Use explicit `test` metadata
-for audit-only execution.
+**Omitted `metadata.dscd.operation` means `set`: adding a DSC document normally
+authorizes DSC to enforce its desired state and modify the machine.** Use explicit
+`test` metadata for audit-only execution.
 
 Linux:
 
@@ -297,8 +306,8 @@ configuration starts a fresh one. This restart is fault recovery, not a retry of
 the failed input. Server startup/initialization failure publishes failures for
 remaining readable inputs, reports a pass-level error and retries next pass.
 
-`*.parameters.yaml`, `*.parameters.json`, and `*.dscd.json` are reserved input
-files, never standalone configurations. Match by the configuration filename
+`*.parameters.yaml` and `*.parameters.json` are reserved parameter sidecars,
+never standalone configurations. Match by the configuration filename
 without its final extension:
 
 ```text
@@ -316,41 +325,51 @@ rather than silently falling back to parameter defaults.
 
 ### Per-configuration metadata
 
-Optional `<basename>.dscd.json` metadata controls one configuration's execution
-policy. Metadata is always JSON and is owned and parsed by `dscd` using
-`encoding/json`; DSC configuration and parameter documents remain opaque.
-
-```text
-web.yaml
-web.parameters.yaml
-web.dscd.json
-```
-
-For audit-only execution, `web.dscd.json` contains:
+The optional `metadata.dscd` object inside a `.yaml` or `.json` configuration
+controls its execution policy. The [YAML example above](#add-configurations) and
+this JSON configuration select the same audit-only operation:
 
 ```json
 {
-  "operation": "test"
+  "$schema": "https://aka.ms/dsc/schemas/v3/bundled/config/document.json",
+  "metadata": {
+    "dscd": {
+      "operation": "test"
+    }
+  },
+  "resources": [
+    {
+      "name": "Example",
+      "type": "Microsoft.DSC.Debug/Echo",
+      "properties": {
+        "output": "Hello"
+      }
+    }
+  ]
 }
 ```
 
 Only `operation` has behavior today. It accepts exactly `"set"` (enforce desired
-state) or `"test"` (audit only). No metadata file, `{}`, or an omitted `operation`
-means **`set`**. Unsupported properties are ignored. An explicit invalid value,
-including `null` or an empty string, never falls back to `set`.
+state) or `"test"` (audit only), with case-sensitive property names and values.
+Missing `metadata`, missing `dscd`, empty objects, or an omitted `operation`
+mean **`set`**. Unrelated metadata namespaces (including `Microsoft.DSC`),
+unknown `dscd` properties and unknown top-level fields are ignored, including
+arbitrary nested objects, arrays, scalars and nulls. They remain in the original
+document sent to DSC.
 
-Metadata association is independent of serialization: `web.json` or `web.yaml`
-can use either parameter format and the same `web.dscd.json` convention.
-Metadata and orphan metadata files are excluded from independent reconciliation.
-There is no metadata YAML support: `*.dscd.yaml` is still an ordinary DSC
-configuration under the existing `.yaml` discovery rule, not metadata;
-`*.dscd.yml` is ignored.
+The document, `metadata`, and `metadata.dscd` must be objects when present.
+An invalid known value, including null/non-string `operation`, an empty string,
+or unsupported spelling, never falls back to `set`. Malformed JSON/YAML,
+multiple YAML documents, ambiguous keys along the metadata path, or unreadable
+input produces an `input` failure for only that configuration, without invoking
+DSC; later configurations continue. Changes are picked up on the next pass
+without restarting the daemon. Parameter sidecars still work with either format,
+and `.yml` remains unsupported.
 
-Malformed, unreadable, or nonregular metadata fails only its configuration with
-an `input` result, without invoking DSC; later configurations continue. A selected
-metadata file disappearing during the pass is also a failure, not permission to
-enforce by default. Publish metadata before its configuration when initially
-enabling audit-only execution.
+**The companion `.dscd.json` mechanism has been removed.** Move its operation into
+the configuration before upgrading, then remove the obsolete file. Former
+companion files are ordinary `.json` configuration candidates, not metadata for
+another file. Without embedded metadata, the configuration defaults to `set`.
 
 A successful `test` that reports `inDesiredState: false` is still a successful
 execution. `dscd` preserves the structured `dscResult` for consumers to inspect
@@ -358,9 +377,10 @@ without interpreting individual resources.
 
 ### DSC inputs
 
-DSC owns parsing, validation, resource discovery, parameter interpretation,
-defaults, substitution, secure values and execution. `dscd` does not inspect
-individual resources or merge either input. It sends the captured configuration
+Beyond document syntax and `metadata.dscd.operation`, DSC owns validation,
+resource discovery, parameter interpretation, defaults, substitution, secure
+values and execution. `dscd` does not inspect individual resources or merge either
+input. It sends the captured configuration
 and optional sidecar text inline through `invoke_dsc_config` with the effective
 `set` or `test` operation; DSC handles resource semantics.
 
@@ -378,11 +398,12 @@ sidecar unchanged rather than parsing or translating it.
 Producers must be trusted and publish complete documents by temporary-file
 replacement, not in-place editing. The daemon opens each input once per attempt,
 captures its UTF-8 text, hashes that snapshot together with the effective operation,
-and sends the same text and operation to DSC. Raw metadata bytes are not hashed:
-formatting changes or ignored properties do not affect identity.
+and sends the same text and operation to DSC. Embedded metadata is part of that
+snapshot: formatting changes and ignored properties change the hash even though
+they do not change the effective operation.
 DSC never reopens the input paths: **bytes hashed equal bytes submitted**.
 Replacing any input after capture does not affect that attempt. Capturing
-configuration, parameters and metadata is not an atomic producer transaction;
+configuration and parameters is not an atomic producer transaction;
 producers still coordinate updates.
 Inline inputs do not provide the CLI's implicit file-root/`DSC_CONFIG_ROOT`
 context; documents must not rely on it.
@@ -407,11 +428,11 @@ Two fields are included when available: `parameters` is the sidecar basename,
 and `inputHash` is the combined SHA-256 identity of the exact submitted
 configuration/parameter bytes and effective operation. Changing parameters or
 switching `set`/`test` changes the identity; absent and empty parameters differ.
-Omitted and explicit `set` metadata have the same hash. The operation-aware hash
-uses the new `dscd-input-v2` framing, so hashes change from earlier versions even
-for default `set`. The result envelope remains schema version 1. Ambiguous,
-unreadable, or invalid inputs have no hash. Startup failures can retain the
-captured hash even though submission could not occur.
+Omitted and explicit `set` metadata have the same operation but different
+configuration bytes and therefore different hashes. The operation-aware hash
+retains the `dscd-input-v2` framing, and the result envelope remains schema version 1.
+Ambiguous, unreadable, or invalid inputs have no hash. Startup failures can retain
+the captured hash even though submission could not occur.
 
 ```json
 {
@@ -440,8 +461,8 @@ forced termination. `stderr` remains present but is empty: a shared server strea
 cannot be reliably attributed to one configuration.
 See the [design](docs/design.md#result-contract) for precedence and field semantics.
 
-Combined configuration/parameter input is limited to **16 MiB** per attempt;
-metadata has a separate **16 MiB** limit.
+Combined configuration/parameter input, including embedded metadata, is limited
+to **16 MiB** per attempt; there is no separate metadata file or byte budget.
 Invalid UTF-8 is rejected to avoid changing bytes when encoding JSON strings.
 Each newline-delimited JSON-RPC stdout frame is limited to **16 MiB**; malformed
 or oversized responses fail the attempt and destroy the session. Stderr is always

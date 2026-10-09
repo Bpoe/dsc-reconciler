@@ -89,11 +89,11 @@ func (r *Reconciler) Pass(ctx context.Context) (passErr error) {
 		hash := ""
 		err = candidate.err
 		input := candidate.input
-		if err == nil && candidate.metadataPath != "" {
-			input.Operation, err = readMetadata(ctx, candidate.metadataPath)
-		}
 		if err == nil {
 			input, err = readInput(ctx, input)
+			if err == nil {
+				input.Operation, err = configurationOperation(path, input.ConfigurationText)
+			}
 			if err == nil {
 				hash = inputHash(input)
 			}

@@ -5,12 +5,12 @@ import (
 	"testing"
 )
 
-func TestUnreadableMetadataFailsOnlyConfiguration(t *testing.T) {
+func TestUnreadableConfigurationWithMetadataFailsOnlyConfiguration(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root can read files without permission bits")
 	}
 	dir := t.TempDir()
-	path := writeMetadata(t, dir, `{"operation":"test"}`)
+	path := writeInput(t, dir, "web.yaml", "metadata: {dscd: {operation: test}}\n")
 	if err := os.Chmod(path, 0000); err != nil {
 		t.Fatal(err)
 	}
@@ -19,5 +19,5 @@ func TestUnreadableMetadataFailsOnlyConfiguration(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	assertMetadataFailure(t, dir)
+	assertConfigurationFailure(t, dir, "web.yaml")
 }

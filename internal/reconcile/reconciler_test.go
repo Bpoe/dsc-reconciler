@@ -50,9 +50,16 @@ func logger() *slog.Logger { return slog.New(slog.NewJSONHandler(io.Discard, nil
 
 func input(t *testing.T, dir, name string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, name), []byte("opaque document"), 0600); err != nil {
+	writeInput(t, dir, name, `{"resources":[]}`)
+}
+
+func writeInput(t *testing.T, dir, name, text string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(text), 0600); err != nil {
 		t.Fatal(err)
 	}
+	return path
 }
 
 func TestDiscoveryAndOrdering(t *testing.T) {
