@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 env:
-  VERSION: ${{ inputs.version || 'v0.0.0' }}
+  RELEASE_VERSION: ${{ inputs.version || 'v0.0.0' }}
 
 jobs:
   check:
@@ -42,7 +42,7 @@ jobs:
       - name: Validate version mapping
         shell: pwsh
         run: |
-          .\packaging\windows\msi\version.ps1 -Version $env:VERSION
+          .\packaging\windows\msi\version.ps1 -Version $env:RELEASE_VERSION
           .\packaging\windows\msi\test-version.ps1
       - name: Install Windows race compiler
         id: msys2
@@ -77,9 +77,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          .\packaging\windows\build.ps1 -Version $env:VERSION -OutputDirectory "$env:RUNNER_TEMP\dist"
+          .\packaging\windows\build.ps1 -Version $env:RELEASE_VERSION -OutputDirectory "$env:RUNNER_TEMP\dist"
           .\packaging\windows\msi\inspect.ps1 `
-              -MsiPath "$env:RUNNER_TEMP\dist\dscd-$env:VERSION-windows-amd64.msi" -Version $env:VERSION
+              -MsiPath "$env:RUNNER_TEMP\dist\dscd-$env:RELEASE_VERSION-windows-amd64.msi" -Version $env:RELEASE_VERSION
       - name: Install Linux packaging tools
         if: runner.os == 'Linux'
         shell: bash
@@ -91,6 +91,8 @@ jobs:
       - name: Build and inspect Linux packages (no installation)
         if: runner.os == 'Linux'
         shell: bash
+        env:
+          VERSION: ${{ env.RELEASE_VERSION }}
         run: |
           bash packaging/linux/build.sh "$RUNNER_TEMP/dist"
           bash packaging/linux/validate.sh "$RUNNER_TEMP/dist"

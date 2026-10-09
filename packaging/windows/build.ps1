@@ -22,11 +22,13 @@ $windows = Join-Path $package 'packaging\windows'
 $msiOutput = Join-Path $stage 'msi'
 $binary = Join-Path $bin 'dscd.exe'
 $originalCGO = $env:CGO_ENABLED
+$originalOS = $env:GOOS
 $originalArch = $env:GOARCH
 Push-Location (Join-Path $PSScriptRoot '..\..')
 try {
     New-Item -ItemType Directory -Path $bin, $docs, $windows, $output -Force | Out-Null
     $env:CGO_ENABLED = '0'
+    $env:GOOS = 'windows'
     $env:GOARCH = 'amd64'
     go build -trimpath -ldflags "-X main.version=$Version" -o $binary ./cmd/dscd
     if ($LASTEXITCODE -ne 0) {
@@ -58,6 +60,7 @@ try {
 finally {
     Pop-Location
     $env:CGO_ENABLED = $originalCGO
+    $env:GOOS = $originalOS
     $env:GOARCH = $originalArch
     if (Test-Path -LiteralPath $stage) {
         Remove-Item -LiteralPath $stage -Recurse -Force

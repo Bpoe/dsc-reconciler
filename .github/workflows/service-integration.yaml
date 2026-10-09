@@ -21,7 +21,7 @@ permissions:
   contents: read
 
 env:
-  VERSION: ${{ inputs.version }}
+  RELEASE_VERSION: ${{ inputs.version }}
 
 jobs:
   service:
@@ -42,7 +42,7 @@ jobs:
           persist-credentials: false
       - name: Validate version
         shell: pwsh
-        run: .\packaging\windows\msi\version.ps1 -Version $env:VERSION
+        run: .\packaging\windows\msi\version.ps1 -Version $env:RELEASE_VERSION
       # Only manual runs build. Release calls use the caller's uploaded packages.
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         if: github.event_name == 'workflow_dispatch'
@@ -53,12 +53,14 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && runner.os == 'Windows'
         shell: pwsh
         run: |
-          .\packaging\windows\build.ps1 -Version $env:VERSION -OutputDirectory "$env:RUNNER_TEMP\dist"
+          .\packaging\windows\build.ps1 -Version $env:RELEASE_VERSION -OutputDirectory "$env:RUNNER_TEMP\dist"
           .\packaging\windows\msi\inspect.ps1 `
-              -MsiPath "$env:RUNNER_TEMP\dist\dscd-$env:VERSION-windows-amd64.msi" -Version $env:VERSION
+              -MsiPath "$env:RUNNER_TEMP\dist\dscd-$env:RELEASE_VERSION-windows-amd64.msi" -Version $env:RELEASE_VERSION
       - name: Build and inspect manual Linux packages
         if: github.event_name == 'workflow_dispatch' && runner.os == 'Linux'
         shell: bash
+        env:
+          VERSION: ${{ env.RELEASE_VERSION }}
         run: |
           sudo apt-get update
           sudo apt-get install -y rpm
@@ -82,6 +84,7 @@ jobs:
         shell: bash
         working-directory: ${{ runner.temp }}/packages
         run: |
+          VERSION="$RELEASE_VERSION"
           if [[ "$RUNNER_OS" == Windows ]]; then
             expected=("dscd-$VERSION-windows-amd64.msi" "dscd-$VERSION-windows-amd64.zip")
           else
@@ -96,8 +99,8 @@ jobs:
         shell: pwsh
         run: |
           .\packaging\windows\msi\test-install.ps1 -Disposable -ProvisionDSC `
-              -MsiPath "$env:RUNNER_TEMP\packages\dscd-$env:VERSION-windows-amd64.msi" `
-              -Version $env:VERSION -ArchivePath "$env:RUNNER_TEMP\packages\dscd-$env:VERSION-windows-amd64.zip"
+              -MsiPath "$env:RUNNER_TEMP\packages\dscd-$env:RELEASE_VERSION-windows-amd64.msi" `
+              -Version $env:RELEASE_VERSION -ArchivePath "$env:RUNNER_TEMP\packages\dscd-$env:RELEASE_VERSION-windows-amd64.zip"
       - name: Debian lifecycle and reconciliation with real systemd
         if: runner.os == 'Linux'
         shell: bash
@@ -106,8 +109,8 @@ jobs:
             https://github.com/PowerShell/DSC/releases/download/v3.3.0/dsc_3.3.0-1_amd64.deb
           echo "af949cd0dd27a573fd74c926edf57b9d2136063f361f11af88738e2df32487c8  $RUNNER_TEMP/dsc.deb" | sha256sum --check
           sudo apt-get install -y "$RUNNER_TEMP/dsc.deb"
-          sudo env VERSION="$VERSION" bash packaging/linux/test-install.sh \
-            "$RUNNER_TEMP/packages/dscd_${VERSION#v}_amd64.deb"
+          sudo env VERSION="$RELEASE_VERSION" bash packaging/linux/test-install.sh \
+            "$RUNNER_TEMP/packages/dscd_${RELEASE_VERSION#v}_amd64.deb"
       - name: Fedora RPM lifecycle without systemd
         if: runner.os == 'Linux'
         shell: bash
@@ -115,7 +118,7 @@ jobs:
           curl --fail --location --output "$RUNNER_TEMP/dsc.rpm" \
             https://github.com/PowerShell/DSC/releases/download/v3.3.0/dsc-3.3.0-1.x86_64.rpm
           echo "09ac4c3c5aeaaec96cdb128a2fe55cd022a31b5ae67d0c77d01e241761708c47  $RUNNER_TEMP/dsc.rpm" | sha256sum --check
-          docker run --rm -e VERSION \
+          docker run --rm -e VERSION="$RELEASE_VERSION" \
             -v "$RUNNER_TEMP/dsc.rpm:/dsc.rpm:ro" \
             -v "$RUNNER_TEMP/packages:/packages:ro" \
             -v "$GITHUB_WORKSPACE/packaging/linux:/tests:ro" \
