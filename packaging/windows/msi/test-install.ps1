@@ -118,6 +118,108 @@ function Extract-Msi([string] $Path, [string] $Name) {
     return $daemon[0].DirectoryName
 }
 
+function Write-CustomResource([string] $Directory) {
+    New-Item -ItemType Directory -Path $Directory -Force | Out-Null
+    $helper = Join-Path $Directory 'custom-resource.ps1'
+    [IO.File]::WriteAllText($helper, @'
+param([string] $Operation, [string] $InputJson)
+if ($Operation -eq 'Schema') {
+    '{"$schema":"http://json-schema.org/draft-07/schema#","type":"object","properties":{"output":{"type":"string"}},"required":["output"],"additionalProperties":false}'
+}
+elseif ($InputJson) {
+    $InputJson
+}
+else {
+    '{"output":"custom discovery preserved"}'
+}
+'@)
+    $prefix = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $helper, '-Operation')
+    $inputArgument = @{ jsonInputArg = '-InputJson'; mandatory = $true }
+    $powershell = Join-Path $PSHOME 'pwsh.exe'
+    $manifest = @{
+        '$schema' = 'https://aka.ms/dsc/schemas/v3/bundled/resource/manifest.json'
+        type = 'DSCD.Package/CustomDiscovery'
+        version = '1.0.0'
+        get = @{ executable = $powershell; args = $prefix + @('Get', $inputArgument) }
+        set = @{ executable = $powershell; args = $prefix + @('Set', $inputArgument) }
+        schema = @{ command = @{ executable = $powershell; args = $prefix + @('Schema') } }
+    } | ConvertTo-Json -Depth 10
+    [IO.File]::WriteAllText((Join-Path $Directory 'custom.dsc.resource.json'), $manifest)
+}
+
+function Invoke-BundledDSC([string] $Executable, [string] $Daemon, [string[]] $Arguments, [string] $CustomDirectory) {
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $Executable
+    $startInfo.WorkingDirectory = $testStage
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($argument in $Arguments) {
+        $startInfo.ArgumentList.Add($argument)
+    }
+    $bundle = Join-Path (Split-Path $Daemon) 'dsc'
+    $keys = @($startInfo.Environment.Keys)
+    # Mirror the daemon's child-only discovery environment, including isolation.
+    if ([IO.Path]::GetFullPath($Executable) -ieq (Join-Path $bundle 'dsc.exe') -and
+        'DSC_RESTRICTED_PATH' -notin $keys) {
+        $pathKey = @($keys | Where-Object { $_ -ieq 'PATH' } | Select-Object -First 1)
+        $pathName = if ($pathKey.Count) { $pathKey[0] } else { 'PATH' }
+        $inheritedPath = $startInfo.Environment[$pathName]
+        $startInfo.Environment[$pathName] = $bundle
+        if ($inheritedPath) {
+            $startInfo.Environment[$pathName] += ';' + $inheritedPath
+        }
+        $resourceKey = @($keys | Where-Object { $_ -ieq 'DSC_RESOURCE_PATH' } | Select-Object -First 1)
+        if ($resourceKey.Count -or $CustomDirectory) {
+            $resourceName = if ($resourceKey.Count) { $resourceKey[0] } else { 'DSC_RESOURCE_PATH' }
+            $locations = $startInfo.Environment[$resourceName]
+            if ($CustomDirectory) {
+                if ($locations) { $locations += ';' }
+                $locations += $CustomDirectory
+            }
+            if ($locations) { $locations += ';' }
+            $startInfo.Environment[$resourceName] = $locations + $bundle
+        }
+    }
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        Assert ($process.Start()) 'start bundled DSC command'
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(60000)) {
+            $process.Kill($true)
+            [void]$process.WaitForExit(10000)
+            throw 'Bundled DSC command timed out.'
+        }
+        $output = $stdout.GetAwaiter().GetResult()
+        [void]$stderr.GetAwaiter().GetResult()
+        Assert ($process.ExitCode -eq 0) "bundled DSC command exit $($process.ExitCode)"
+        return $output.TrimEnd([char[]]"`r`n")
+    }
+    finally {
+        $process.Dispose()
+    }
+}
+
+function Assert-BundledResources([string] $Executable, [string] $Daemon, [string] $ExpectedVersion) {
+    $versionOutput = Invoke-BundledDSC $Executable $Daemon @('--version')
+    Assert ($versionOutput -ceq $ExpectedVersion) 'direct bundled DSC exact version'
+    $customDirectory = Join-Path $testStage 'direct custom resources'
+    Write-CustomResource $customDirectory
+    foreach ($external in @('', $customDirectory)) {
+        $output = Invoke-BundledDSC $Executable $Daemon @('resource', 'list', '--output-format', 'json') $external
+        $resources = @($output -split '\r?\n' | Where-Object { $_.Trim() } | ForEach-Object { $_ | ConvertFrom-Json })
+        foreach ($type in @('Microsoft.DSC.Debug/Echo', 'Microsoft/OSInfo', 'Microsoft.Windows/Registry')) {
+            Assert ($type -in $resources.type) "direct bundled resource discovery: $type"
+        }
+        if ($external) {
+            Assert ('DSCD.Package/CustomDiscovery' -in $resources.type) 'external custom manifest remains discoverable alongside bundled resources'
+        }
+    }
+}
+
 function Assert-ACL([string] $Path) {
     $acl = Get-Acl -LiteralPath $Path
     Assert $acl.AreAccessRulesProtected "inheritance disabled on $Path"
@@ -142,13 +244,19 @@ function Assert-Installed {
         if ($expectedHash) {
             Assert ((Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash -ceq $expectedHash) 'MSI and ZIP contain the same executable'
         }
-        Assert-Payload $dscDirectory (Join-Path $expectedInstalledRoot 'dsc')
-        Assert ((Get-FileHash -LiteralPath $binary).Hash -ceq
-            (Get-FileHash -LiteralPath (Join-Path $expectedInstalledRoot 'dscd.exe')).Hash) 'installed daemon exactly matches current MSI'
-        $dscVersion = & $dscExecutable --version
-        Assert ($LASTEXITCODE -eq 0 -and ($dscVersion -join ' ') -match '\b3\.3\.0\b') 'bundled DSC 3.3.0 runs'
-        Assert-Standalone
     }
+    Assert-Payload $dscDirectory (Join-Path $expectedInstalledRoot 'dsc')
+    Assert ((Get-FileHash -LiteralPath $binary).Hash -ceq
+        (Get-FileHash -LiteralPath (Join-Path $expectedInstalledRoot 'dscd.exe')).Hash) 'installed daemon exactly matches current MSI'
+    $expectedDscVersion = & (Join-Path $expectedInstalledRoot 'dsc\dsc.exe') --version
+    Assert ($LASTEXITCODE -eq 0) 'current MSI DSC executable runs'
+    $dscVersion = & $dscExecutable --version
+    Assert ($LASTEXITCODE -eq 0 -and ($dscVersion -join "`n") -ceq ($expectedDscVersion -join "`n")) 'installed DSC version matches current MSI'
+    if ($currentMsi -eq $MsiPath) {
+        Assert (($dscVersion -join "`n") -ceq 'dsc 3.3.0') 'initial bundled stable DSC 3.3.0'
+    }
+    Assert-BundledResources $dscExecutable $binary ($expectedDscVersion -join "`n")
+    Assert-Standalone
 
     $service = Get-Service dscd
     try {
@@ -267,21 +375,15 @@ function Assert-ZIP {
     Copy-Item -LiteralPath (Join-Path $config 'package-smoke.json'), (Join-Path $config 'package-registry.json') `
         -Destination $inputDirectory
     $archiveDSC = Join-Path (Split-Path $archiveBinary) 'dsc'
-    $customManifest = Get-Content -Raw -LiteralPath (Join-Path $archiveDSC 'echo.dsc.resource.json') | ConvertFrom-Json
-    $customManifest.type = 'DSCD.Package/CustomDiscovery'
-    foreach ($operation in @('get', 'set', 'test', 'export')) {
-        $customManifest.$operation.executable = Join-Path $archiveDSC 'dscecho.exe'
-    }
-    $customManifest.schema.command.executable = Join-Path $archiveDSC 'dscecho.exe'
-    [IO.File]::WriteAllText((Join-Path $customResourceDirectory 'custom.dsc.resource.json'),
-        ($customManifest | ConvertTo-Json -Depth 10))
+    Write-CustomResource $customResourceDirectory
+    Assert-BundledResources (Join-Path $archiveDSC 'dsc.exe') $archiveBinary 'dsc 3.3.0'
     $customDocument = '{"$schema":"https://aka.ms/dsc/schemas/v3/bundled/config/document.json","resources":[{"name":"Custom discovery","type":"DSCD.Package/CustomDiscovery","properties":{"output":"custom discovery preserved"}}]}'
     [IO.File]::WriteAllText((Join-Path $inputDirectory 'package-custom.json'), $customDocument)
     # DSC_RESOURCE_PATH replaces manifest discovery through PATH. Both this
     # custom manifest and the bundled Registry manifest must remain discoverable.
     $resourcePath = $env:DSC_RESOURCE_PATH
     try {
-        $env:DSC_RESOURCE_PATH = $customResourceDirectory
+        $env:DSC_RESOURCE_PATH = if ($resourcePath) { "$resourcePath;$customResourceDirectory" } else { $customResourceDirectory }
         $process = Start-Process -FilePath $archiveBinary -ArgumentList @('-config-dir', "`"$inputDirectory`"",
             '-results-dir', "`"$outputDirectory`"", '-interval', '1h') -WorkingDirectory $directory -PassThru `
             -RedirectStandardOutput (Join-Path $logDirectory 'zip-stdout.log') -RedirectStandardError (Join-Path $logDirectory 'zip-stderr.log')

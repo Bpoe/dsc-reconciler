@@ -214,7 +214,9 @@ On native Windows with Go, PowerShell 7 and the .NET SDK:
 The builder produces ZIP, MSI and checksums without installing the service.
 It downloads the version-pinned official Windows x64 DSC ZIP once, verifies its
 pinned SHA-256 before extraction, and shares that complete temporary payload
-between both artifacts. Downloaded files are removed on success or failure.
+between both artifacts. Upstream `NOTICE.txt` is retained; the upstream MIT
+`LICENSE` (not shipped in that ZIP) is downloaded from the pinned version and
+checksum-verified alongside it. Downloaded files are removed on success or failure.
 To update bundled DSC, update the version and SHA-256 constants in
 `packaging/windows/build.ps1` using the official release asset's published digest, then
 run package inspection and disposable Windows installation tests and update

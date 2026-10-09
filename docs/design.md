@@ -655,6 +655,9 @@ fail packaging. The same staged executable and unmodified DSC tree feed both
 artifacts: `[ProgramFiles64Folder]dscd\dsc` in MSI, `bin\dsc` in ZIP.
 Every upstream file retains its relative name and directory, including licenses
 and attribution; these accompany dsc-reconciler's separate MIT `LICENSE`.
+The archive includes `NOTICE.txt` but omits the project's MIT `LICENSE`; the builder
+downloads that license from the same version-tagged source, verifies its separate
+pinned SHA-256 and installs it as `dsc\LICENSE`.
 No download occurs during installation.
 
 To update the bundle, change the version and checksum constants in the Windows
