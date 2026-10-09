@@ -15,36 +15,105 @@ import (
 	"github.com/Bpoe/dsc-reconciler/internal/dsc"
 )
 
-func writeMetadata(t *testing.T, dir, content string) string {
-	t.Helper()
-	path := filepath.Join(dir, "web.dscd.json")
-	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
-		t.Fatal(err)
+func TestConfigurationOperation(t *testing.T) {
+	for _, test := range []struct {
+		name, json, yaml string
+		want             dsc.Operation
+	}{
+		{"no metadata", `{"resources":[]}`, "resources: []\n", dsc.OperationSet},
+		{"empty document object", `{}`, "{}\n", dsc.OperationSet},
+		{"empty metadata", `{"metadata":{}}`, "metadata: {}\n", dsc.OperationSet},
+		{"empty dscd", `{"metadata":{"dscd":{}}}`, "metadata:\n  dscd: {}\n", dsc.OperationSet},
+		{"explicit set", `{"metadata":{"dscd":{"operation":"set"}}}`, "metadata:\n  dscd:\n    operation: set\n", dsc.OperationSet},
+		{"explicit test", `{"metadata":{"dscd":{"operation":"test"}}}`, "metadata:\n  dscd:\n    operation: test\n", dsc.OperationTest},
+		{"unknown namespace", `{"metadata":{"anotherTool":{"arbitrary":["a",1,true,null,{}]}}}`, "metadata:\n  anotherTool:\n    arbitrary: [a, 1, true, null, {}]\n", dsc.OperationSet},
+		{"unknown scalar properties", `{"metadata":{"future":null,"customTool":false,"dscd":{"number":1e9999,"string":"hello","boolean":true,"null":null}}}`, "metadata:\n  future: null\n  customTool: false\n  dscd:\n    number: 1e9999\n    string: hello\n    boolean: true\n    null: null\n", dsc.OperationSet},
+		{"unknown dscd property", `{"metadata":{"dscd":{"foobar":"hello","futureSetting":{"enabled":true,"values":["one","two"]}}}}`, "metadata:\n  dscd:\n    foobar: hello\n    futureSetting:\n      enabled: true\n      values: [one, two]\n", dsc.OperationSet},
+		{"unknown top level", `{"future":[{},null,false,3,"text"]}`, "future: [{}, null, false, 3, text]\n", dsc.OperationSet},
+		{"case sensitive metadata", `{"Metadata":{"dscd":{"operation":"test"}}}`, "Metadata:\n  dscd:\n    operation: test\n", dsc.OperationSet},
+		{"case sensitive namespace", `{"metadata":{"DSCD":{"operation":"test"}}}`, "metadata:\n  DSCD:\n    operation: test\n", dsc.OperationSet},
+		{"case sensitive operation", `{"metadata":{"dscd":{"Operation":"test","OPERATION":null}}}`, "metadata:\n  dscd:\n    Operation: test\n    OPERATION: null\n", dsc.OperationSet},
+		{"exact operation", `{"metadata":{"dscd":{"Operation":"set","operation":"test","OPERATION":null}}}`, "metadata:\n  dscd:\n    Operation: set\n    operation: test\n    OPERATION: null\n", dsc.OperationTest},
+		{"Unicode escapes in unknown properties", `{"metadata":{"dscd":{"operation":"test","future":"\ud83d\ude00"}}}`, "metadata:\n  dscd:\n    operation: test\n    future: \"\\U0001F600\"\n", dsc.OperationTest},
+		{"combined unknown properties", `{
+  "$schema": "https://aka.ms/dsc/schemas/v3/bundled/config/document.json",
+  "metadata": {
+    "Microsoft.DSC": {"securityContext": "elevated"},
+    "customTool": {"arbitrary": [null, false, 42, "secret", {"nested": []}]},
+    "dscd": {"operation": "test", "foobar": "hello", "futureSetting": {"enabled": true, "values": ["one", "two"]}}
+  },
+  "future": [null, {"anything": true}],
+  "parameters": {"message": {"type": "string"}},
+  "resources": [{"name": "Example", "type": "Microsoft.DSC.Debug/Echo", "properties": {"output": "[parameters('message')]"}}]
+}`, `$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+metadata:
+  Microsoft.DSC:
+    securityContext: elevated
+  customTool:
+    arbitrary: [null, false, 42, secret, {nested: []}]
+  dscd:
+    operation: test
+    foobar: hello
+    futureSetting:
+      enabled: true
+      values: [one, two]
+future: [null, {anything: true}]
+parameters:
+  message:
+    type: string
+resources:
+  - name: Example
+    type: Microsoft.DSC.Debug/Echo
+    properties:
+      output: "[parameters('message')]"
+`, dsc.OperationTest},
+	} {
+		for ext, text := range map[string]string{".json": test.json, ".yaml": test.yaml, ".json.yaml": test.json} {
+			t.Run(test.name+ext, func(t *testing.T) {
+				got, err := configurationOperation("web"+ext, text)
+				if err != nil || got != test.want {
+					t.Fatalf("operation = %q (%v), want %q", got, err, test.want)
+				}
+			})
+		}
 	}
-	return path
 }
 
-func TestMetadataAssociation(t *testing.T) {
-	for _, configuration := range []string{"web.yaml", "web.json"} {
-		for _, parameters := range []string{"", "web.parameters.yaml", "web.parameters.json"} {
-			t.Run(configuration+"/"+parameters, func(t *testing.T) {
+func TestYAMLMetadataAliasesAndMerges(t *testing.T) {
+	for _, text := range []string{
+		"policy: &policy {operation: test}\nmetadata: {dscd: *policy}\n",
+		"policy: &policy {operation: test}\nmetadata: {dscd: {<<: *policy}}\n",
+		"policy: &policy {operation: set}\nmetadata: {dscd: {<<: *policy, operation: test}}\n",
+		"policy: &policy {dscd: {operation: test}}\nmetadata: {<<: [*policy]}\n",
+		"policy: &policy {metadata: {dscd: {operation: test}}}\n<<: *policy\n",
+		"policy: &policy test\nmetadata: {dscd: {operation: *policy}}\n",
+	} {
+		t.Run(text, func(t *testing.T) {
+			op, err := configurationOperation("web.yaml", text)
+			if err != nil || op != dsc.OperationTest {
+				t.Fatalf("YAML policy ignored: %q (%v)", op, err)
+			}
+		})
+	}
+}
+
+func TestEmbeddedMetadataAndParametersSubmittedUnchanged(t *testing.T) {
+	for ext, text := range map[string]string{
+		".json": `{"metadata":{"Microsoft.DSC":{"securityContext":"elevated"},"dscd":{"operation":"test","future":[null,1,true,{},[]]}},"parameters":{"message":{"type":"string"}},"resources":[{"name":"Example","type":"Microsoft.DSC.Debug/Echo","properties":{"output":"[parameters('message')]"}}]}`,
+		".yaml": "# Preserve comments, formatting, expressions and unrelated metadata.\nmetadata:\n  Microsoft.DSC: {securityContext: elevated}\n  dscd:\n    operation: test\n    future: [null, 1, true, {}, []]\nparameters:\n  message: {type: string}\nresources:\n  - name: Example\n    type: Microsoft.DSC.Debug/Echo\n    properties:\n      output: \"[parameters('message')]\"\n",
+	} {
+		for _, params := range []struct{ name, text string }{
+			{"", ""}, {"web.parameters.yaml", "message: Hello\n"}, {"web.parameters.json", `{"message":"Hello"}`},
+		} {
+			t.Run(ext+"/"+params.name, func(t *testing.T) {
 				dir := t.TempDir()
-				input(t, dir, configuration)
-				if parameters != "" {
-					input(t, dir, parameters)
-				}
-				path := writeMetadata(t, dir, `{"operation":"test"}`)
-				input(t, dir, "orphan.dscd.json")
-				found, err := discover(dir)
-				if err != nil || len(found) != 1 || found[0].err != nil || found[0].metadataPath != path {
-					t.Fatalf("metadata discovery: %+v (%v)", found, err)
-				}
 				want := dsc.Input{
-					Configuration: filepath.Join(dir, configuration), ConfigurationText: "opaque document",
-					Operation: dsc.OperationTest,
+					Configuration:     writeInput(t, dir, "web"+ext, text),
+					ConfigurationText: text, Operation: dsc.OperationTest,
 				}
-				if parameters != "" {
-					want.Parameters, want.ParametersText = filepath.Join(dir, parameters), "opaque document"
+				if params.name != "" {
+					want.Parameters = writeInput(t, dir, params.name, params.text)
+					want.ParametersText = params.text
 				}
 				calls := 0
 				client := fakeDSC{run: func(_ context.Context, in dsc.Input) dsc.Result {
@@ -52,7 +121,7 @@ func TestMetadataAssociation(t *testing.T) {
 					if in != want {
 						t.Fatalf("captured input = %+v, want %+v", in, want)
 					}
-					return dsc.Result{Configuration: configuration, Operation: &in.Operation, Outcome: "succeeded"}
+					return dsc.Result{Configuration: "web" + ext, Operation: &in.Operation, Outcome: "succeeded"}
 				}}
 				writer := &fakeWriter{}
 				if err := New(dir, time.Second, client.start, writer, logger()).Pass(context.Background()); err != nil {
@@ -66,74 +135,61 @@ func TestMetadataAssociation(t *testing.T) {
 	}
 }
 
-func TestMetadataDefaultsAndHashIdentity(t *testing.T) {
-	dir := t.TempDir()
-	input(t, dir, "web.yaml")
-	input(t, dir, "web.parameters.json")
-	var logs bytes.Buffer
-	var operations []dsc.Operation
-	client := fakeDSC{run: func(_ context.Context, in dsc.Input) dsc.Result {
-		operations = append(operations, in.Operation)
-		return dsc.Result{Configuration: "web.yaml", Operation: &in.Operation, Outcome: "succeeded"}
-	}}
-	writer := &fakeWriter{}
-	r := New(dir, time.Second, client.start, writer, slog.New(slog.NewJSONHandler(&logs, nil)))
-	hashes := make(map[dsc.Operation]string)
-	for _, test := range []struct {
-		name, content string
-		operation     dsc.Operation
-	}{
-		{"missing", "", dsc.OperationSet},
-		{"empty object", `{}`, dsc.OperationSet},
-		{"explicit set", `{"operation":"set"}`, dsc.OperationSet},
-		{"explicit test", `{"operation":"test"}`, dsc.OperationTest},
-		{"formatted test", "{\n  \"operation\": \"test\"\n}\n", dsc.OperationTest},
-		{"unknown property", `{"operation":"test","future":{"secret":"PRIVATE-METADATA"}}`, dsc.OperationTest},
-		{"only unknown property", `{"future":"PRIVATE-METADATA"}`, dsc.OperationSet},
-		{"capitalized property", `{"Operation":"test"}`, dsc.OperationSet},
-		{"uppercase property", `{"OPERATION":"test"}`, dsc.OperationSet},
-		{"invalid capitalized property", `{"Operation":null}`, dsc.OperationSet},
-		{"exact set before capitalized test", `{"operation":"set","Operation":"test"}`, dsc.OperationSet},
-		{"exact set after capitalized test", `{"Operation":"test","operation":"set"}`, dsc.OperationSet},
-		{"exact test before uppercase set", `{"operation":"test","OPERATION":"set"}`, dsc.OperationTest},
-		{"exact test after uppercase set", `{"OPERATION":"set","operation":"test"}`, dsc.OperationTest},
-		{"removed", "", dsc.OperationSet},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if test.content != "" {
-				writeMetadata(t, dir, test.content)
-			} else if test.name == "removed" {
-				if err := os.Remove(filepath.Join(dir, "web.dscd.json")); err != nil {
+func TestEmbeddedMetadataRediscoveryAndHashIdentity(t *testing.T) {
+	for _, ext := range []string{".json", ".yaml"} {
+		t.Run(ext, func(t *testing.T) {
+			dir := t.TempDir()
+			var logs bytes.Buffer
+			var calls []dsc.Input
+			client := fakeDSC{run: func(_ context.Context, in dsc.Input) dsc.Result {
+				calls = append(calls, in)
+				return dsc.Result{Configuration: filepath.Base(in.Configuration), Operation: &in.Operation, Outcome: "succeeded"}
+			}}
+			writer := &fakeWriter{}
+			r := New(dir, time.Second, client.start, writer, slog.New(slog.NewJSONHandler(&logs, nil)))
+			hashes := make(map[string]string)
+			for _, test := range []struct {
+				json, yaml string
+				op         dsc.Operation
+			}{
+				{`{"resources":[]}`, "resources: []\n", dsc.OperationSet},
+				{`{"metadata":{"dscd":{"operation":"test"}},"resources":[]}`, "metadata:\n  dscd:\n    operation: test\nresources: []\n", dsc.OperationTest},
+				{`{"metadata":{"dscd":{"operation":"set"}},"resources":[]}`, "metadata:\n  dscd:\n    operation: set\nresources: []\n", dsc.OperationSet},
+				{`{ "metadata": { "dscd": { "operation": "set" } }, "resources": [] }`, "# Formatting changes are still input changes.\nmetadata: {dscd: {operation: set}}\nresources: []\n", dsc.OperationSet},
+				{`{"metadata":{"dscd":{"operation":"set","future":"PRIVATE-METADATA"}},"resources":[]}`, "metadata:\n  dscd:\n    operation: set\n    future: PRIVATE-METADATA\nresources: []\n", dsc.OperationSet},
+				{`{"resources":[]}`, "resources: []\n", dsc.OperationSet},
+			} {
+				text := test.json
+				if ext == ".yaml" {
+					text = test.yaml
+				}
+				writeInput(t, dir, "web"+ext, text)
+				if err := r.Pass(context.Background()); err != nil {
 					t.Fatal(err)
 				}
+				result := writer.results[len(writer.results)-1]
+				in := calls[len(calls)-1]
+				if in.Operation != test.op || in.ConfigurationText != text ||
+					result.Operation == nil || *result.Operation != test.op || result.InputHash != inputHash(in) {
+					t.Fatalf("operation/snapshot mismatch: %+v, input=%+v", result, in)
+				}
+				for previous, hash := range hashes {
+					if (result.InputHash == hash) != (previous == text) {
+						t.Fatal("hash did not identify the exact submitted configuration bytes")
+					}
+				}
+				hashes[text] = result.InputHash
 			}
-			if err := r.Pass(context.Background()); err != nil {
-				t.Fatal(err)
+			if len(calls) != 6 || strings.Contains(logs.String(), "PRIVATE-METADATA") ||
+				!strings.Contains(logs.String(), `"operation":"test"`) {
+				t.Fatalf("missing calls/operation or leaked metadata: calls=%d logs=%s", len(calls), logs.String())
 			}
-			result := writer.results[len(writer.results)-1]
-			if operations[len(operations)-1] != test.operation || result.Operation == nil || *result.Operation != test.operation {
-				t.Fatalf("incorrect operation: %+v, calls=%v", result, operations)
-			}
-			if result.InputHash == "" {
-				t.Fatal("missing hash")
-			}
-			if previous := hashes[test.operation]; previous != "" && result.InputHash != previous {
-				t.Fatal("metadata formatting or ignored properties changed input identity")
-			}
-			hashes[test.operation] = result.InputHash
 		})
-	}
-	if hashes[dsc.OperationSet] == hashes[dsc.OperationTest] {
-		t.Fatal("operation does not contribute to hash")
-	}
-	if strings.Contains(logs.String(), "PRIVATE-METADATA") || !strings.Contains(logs.String(), `"operation":"test"`) {
-		t.Fatalf("missing operation or leaked metadata in logs: %s", logs.String())
 	}
 }
 
-func assertMetadataFailure(t *testing.T, dir string) {
+func assertConfigurationFailure(t *testing.T, dir, name string) {
 	t.Helper()
-	input(t, dir, "web.yaml")
 	input(t, dir, "z-last.json")
 	var calls []string
 	var logs bytes.Buffer
@@ -146,89 +202,97 @@ func assertMetadataFailure(t *testing.T, dir string) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(calls, []string{"z-last.json"}) || len(writer.results) != 2 {
-		t.Fatalf("invalid metadata executed or stopped pass: calls=%v, results=%+v", calls, writer.results)
+		t.Fatalf("invalid input executed or stopped pass: calls=%v, results=%+v", calls, writer.results)
 	}
 	failed := writer.results[0]
-	if failed.Outcome != "failed" || failed.Error == nil || failed.Error.Kind != "input" ||
-		!strings.Contains(failed.Error.Message, "web.dscd.json") || failed.InputHash != "" ||
+	if failed.Configuration != name || failed.Outcome != "failed" || failed.Error == nil || failed.Error.Kind != "input" ||
+		(!strings.Contains(failed.Error.Message, name) && (failed.Parameters == "" || !strings.Contains(failed.Error.Message, failed.Parameters))) || failed.InputHash != "" ||
 		failed.Operation != nil || failed.DSCResult != nil {
-		t.Fatalf("metadata failure: %+v", failed)
+		t.Fatalf("input failure: %+v", failed)
 	}
-	if strings.Contains(logs.String(), "PRIVATE-METADATA") {
-		t.Fatal("metadata contents leaked into logs")
+	if strings.Contains(logs.String(), "PRIVATE-METADATA") || strings.Contains(failed.Error.Message, "PRIVATE-METADATA") {
+		t.Fatal("input contents leaked into diagnostics")
 	}
 }
 
-func TestInvalidMetadataFailsOnlyConfiguration(t *testing.T) {
+func TestInvalidEmbeddedMetadataFailsOnlyConfiguration(t *testing.T) {
 	for _, content := range []string{
-		"", "{", `{"operation":`, `{"operation":"test"} {}`, `[]`, `null`, `"test"`,
-		`{"operation":"apply"}`, `{"operation":"PRIVATE-METADATA"}`, `{"operation":""}`,
-		`{"operation":null}`, `{"operation":false}`, `{"operation":1}`, `{"operation":[]}`,
-		`{"operation":{}}`, `{"operation":"Test"}`, `{"operation":" test "}`, "{\"x\":\"\xff\"}",
-		`{"operation":null,"Operation":"test"}`, `{"OPERATION":"test","operation":null}`,
+		"", "{", `[]`, `null`, `"PRIVATE-METADATA"`, `{"resources":[]} {}`,
+		`{"metadata":null}`, `{"metadata":[]}`, `{"metadata":"PRIVATE-METADATA"}`,
+		`{"metadata":{"dscd":null}}`, `{"metadata":{"dscd":[]}}`, `{"metadata":{"dscd":true}}`,
+		`{"metadata":{"dscd":{"operation":"apply"}}}`,
+		`{"metadata":{"dscd":{"operation":"PRIVATE-METADATA"}}}`,
+		`{"metadata":{"dscd":{"operation":""}}}`,
+		`{"metadata":{"dscd":{"operation":null}}}`,
+		`{"metadata":{"dscd":{"operation":false}}}`,
+		`{"metadata":{"dscd":{"operation":1}}}`,
+		`{"metadata":{"dscd":{"operation":[]}}}`,
+		`{"metadata":{"dscd":{"operation":{}}}}`,
+		`{"metadata":{"dscd":{"operation":"Test"}}}`,
+		`{"metadata":{"dscd":{"operation":" test "}}}`,
+		`{"metadata":{"dscd":{"operation":null,"Operation":"test"}}}`,
+		`{"metadata":{"dscd":{"operation":"test","operation":"set"}}}`,
+		`{"metadata":{"dscd":{"operation":"test"},"dscd":{}}}`,
+		`{"metadata":{"dscd":{"operation":"test"}},"metadata":{}}`,
+		"{\"metadata\":\"\xff\"}",
 	} {
-		t.Run(content, func(t *testing.T) {
+		for _, ext := range []string{".json", ".yaml"} {
+			t.Run(ext+"/"+content, func(t *testing.T) {
+				dir := t.TempDir()
+				writeInput(t, dir, "web"+ext, content)
+				assertConfigurationFailure(t, dir, "web"+ext)
+			})
+		}
+	}
+	for _, text := range []string{
+		"# empty\n", "metadata: [PRIVATE-METADATA", "metadata:\n  dscd: *PRIVATE-METADATA\n",
+		"metadata: {}\n---\nmetadata: {dscd: {operation: test}}\n",
+		"metadata: {}\n---\n", "metadata: {}\n---\n[PRIVATE-METADATA",
+		"metadata:\n  dscd:\n    operation:\n", "metadata:\n  dscd:\n    operation: true\n",
+		"metadata:\n  dscd:\n    operation: 1\n", "metadata:\n  dscd:\n    operation: [test]\n",
+		"metadata:\n  dscd:\n    operation: Test\n", "metadata:\n  dscd:\n    operation: ' test '\n",
+		"metadata:\n  dscd:\n    operation: test\n    operation: set\n",
+		"metadata:\n  dscd:\n    operation: !!binary dGVzdA==\n",
+		"metadata: &loop {<<: *loop}\n",
+	} {
+		t.Run(text, func(t *testing.T) {
 			dir := t.TempDir()
-			writeMetadata(t, dir, content)
-			assertMetadataFailure(t, dir)
+			writeInput(t, dir, "web.yaml", text)
+			assertConfigurationFailure(t, dir, "web.yaml")
 		})
 	}
+	t.Run("JSON cannot use YAML syntax", func(t *testing.T) {
+		dir := t.TempDir()
+		writeInput(t, dir, "web.json", "metadata: {dscd: {operation: test}}\n")
+		assertConfigurationFailure(t, dir, "web.json")
+	})
 }
 
-func TestNonregularMetadataFailsOnlyConfiguration(t *testing.T) {
-	for _, kind := range []string{"directory", "symlink"} {
-		t.Run(kind, func(t *testing.T) {
-			dir := t.TempDir()
-			path := filepath.Join(dir, "web.dscd.json")
-			if kind == "directory" {
-				if err := os.Mkdir(path, 0700); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				target := filepath.Join(dir, "target.txt")
-				if err := os.WriteFile(target, []byte(`{}`), 0600); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(target, path); err != nil {
-					t.Skipf("symlink privilege unavailable: %v", err)
-				}
-			}
-			assertMetadataFailure(t, dir)
-		})
-	}
-}
-
-func TestMetadataDisappearsAfterDiscovery(t *testing.T) {
+func TestFormerCompanionFilesAreOrdinaryConfigurations(t *testing.T) {
 	dir := t.TempDir()
-	for _, name := range []string{"a-first.yaml", "web.yaml", "z-last.yaml"} {
-		input(t, dir, name)
-	}
-	path := writeMetadata(t, dir, `{"operation":"test"}`)
+	input(t, dir, "web.yaml")
+	writeInput(t, dir, "web.dscd.json", `{"operation":"test"}`)
+	writeInput(t, dir, "orphan.dscd.json", `{"metadata":{"dscd":{"operation":"test"}},"resources":[]}`)
+	want := []dsc.Operation{dsc.OperationTest, dsc.OperationSet, dsc.OperationSet}
 	var calls []string
 	client := fakeDSC{run: func(_ context.Context, in dsc.Input) dsc.Result {
-		name := filepath.Base(in.Configuration)
-		calls = append(calls, name)
-		if name == "a-first.yaml" {
-			if err := os.Remove(path); err != nil {
-				t.Fatal(err)
-			}
+		if in.Operation != want[len(calls)] {
+			t.Fatalf("companion-file policy still applied: %+v", in)
 		}
-		return dsc.Result{Configuration: name, Operation: &in.Operation, Outcome: "succeeded"}
+		calls = append(calls, filepath.Base(in.Configuration))
+		return dsc.Result{Configuration: filepath.Base(in.Configuration), Operation: &in.Operation, Outcome: "succeeded"}
 	}}
-	writer := &fakeWriter{}
-	if err := New(dir, time.Second, client.start, writer, logger()).Pass(context.Background()); err != nil {
+	if err := New(dir, time.Second, client.start, &fakeWriter{}, logger()).Pass(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(calls, []string{"a-first.yaml", "z-last.yaml"}) || len(writer.results) != 3 ||
-		writer.results[1].Error == nil || writer.results[1].Error.Kind != "input" || writer.results[1].Operation != nil {
-		t.Fatalf("missing metadata fell back to set: calls=%v, results=%+v", calls, writer.results)
+	if !reflect.DeepEqual(calls, []string{"orphan.dscd.json", "web.dscd.json", "web.yaml"}) {
+		t.Fatalf("former companion files received special treatment: %v", calls)
 	}
 }
 
 func TestInvalidMetadataOnlyPassDoesNotStartServer(t *testing.T) {
 	dir := t.TempDir()
-	input(t, dir, "web.yaml")
-	writeMetadata(t, dir, `{"operation":"apply"}`)
+	writeInput(t, dir, "web.yaml", "metadata: {dscd: {operation: apply}}\n")
 	writer := &fakeWriter{}
 	start := func(context.Context) (DSC, error) {
 		t.Fatal("started server for invalid metadata")
@@ -242,15 +306,30 @@ func TestInvalidMetadataOnlyPassDoesNotStartServer(t *testing.T) {
 	}
 }
 
-func TestMetadataSizeLimit(t *testing.T) {
+func TestEmbeddedMetadataSharesInputSizeLimit(t *testing.T) {
 	dir := t.TempDir()
-	content := `{"ignored":"` + strings.Repeat("x", maxInputBytes-len(`{"ignored":""}`)) + `"}`
-	path := writeMetadata(t, dir, content)
-	if op, err := readMetadata(context.Background(), path); err != nil || op != dsc.OperationSet {
-		t.Fatalf("exact metadata size limit rejected: %q (%v)", op, err)
+	const prefix = `{"metadata":{"dscd":{"operation":"test","ignored":"`
+	const suffix = `"}},"resources":[]}`
+	text := prefix + strings.Repeat("x", maxInputBytes-len(prefix)-len(suffix)) + suffix
+	writeInput(t, dir, "web.json", text)
+	calls := 0
+	client := fakeDSC{run: func(_ context.Context, in dsc.Input) dsc.Result {
+		calls++
+		if in.Operation != dsc.OperationTest || in.ConfigurationText != text {
+			t.Fatal("limit-sized snapshot changed")
+		}
+		return dsc.Result{Configuration: "web.json", Operation: &in.Operation, Outcome: "succeeded"}
+	}}
+	if err := New(dir, time.Second, client.start, &fakeWriter{}, logger()).Pass(context.Background()); err != nil || calls != 1 {
+		t.Fatalf("exact input limit rejected: calls=%d err=%v", calls, err)
 	}
-	writeMetadata(t, dir, content+" ")
-	assertMetadataFailure(t, dir)
+	writeInput(t, dir, "web.parameters.json", " ")
+	assertConfigurationFailure(t, dir, "web.json")
+	if err := os.Remove(filepath.Join(dir, "web.parameters.json")); err != nil {
+		t.Fatal(err)
+	}
+	writeInput(t, dir, "web.json", text+" ")
+	assertConfigurationFailure(t, dir, "web.json")
 }
 
 func TestOperationHashWithoutParameters(t *testing.T) {
@@ -264,8 +343,7 @@ func TestOperationHashWithoutParameters(t *testing.T) {
 
 func TestMetadataStartupFailureRetainsOperation(t *testing.T) {
 	dir := t.TempDir()
-	input(t, dir, "web.yaml")
-	writeMetadata(t, dir, `{"operation":"test"}`)
+	writeInput(t, dir, "web.yaml", "metadata: {dscd: {operation: test}}\n")
 	writer := &fakeWriter{}
 	start := func(context.Context) (DSC, error) { return nil, os.ErrNotExist }
 	if err := New(dir, time.Second, start, writer, logger()).Pass(context.Background()); err == nil {

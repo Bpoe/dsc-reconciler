@@ -90,39 +90,41 @@ result types can live in `internal/dsc`. Keep dependencies acyclic: the client a
 writer must not depend on the scheduling loop. The client does not write results;
 the writer does not invoke DSC or schedule work.
 
-DSC owns document parsing, validation, resource semantics, and execution. Treat
-configuration documents and parameter sidecars as opaque inputs. Associate
+DSC owns schema validation, resource semantics, and execution. Inspect configuration
+syntax and embedded `metadata.dscd` only; parameter sidecars remain opaque. Associate
 `.parameters.yaml` and `.parameters.json` files by basename, reject ambiguous
 basenames, and never reconcile sidecars independently. Read each input once,
 hash the captured UTF-8 strings and effective operation using the documented
 `dscd-input-v2` framing, and submit exactly those strings and operation to DSC.
-Hash normalized `set`/`test`, not raw metadata bytes: formatting and unsupported
-properties must not change identity. The hash identifies the submitted input,
-not a skip key.
-Do not introduce a YAML parser to
-inspect files DSC can consume. Parsing DSC execution output is a separate,
-necessary boundary responsibility; it does not justify modeling DSC resources.
+Hash the original document, including all metadata bytes, and the normalized
+`set`/`test` operation. Formatting and ignored-property edits change the submitted
+input identity, not the operation. The hash is not a skip key.
+Use `go.yaml.in/yaml/v3` nodes for YAML and `encoding/json` raw messages for JSON
+to extract metadata without modeling DSC resources. Never strip or reserialize inputs.
 
-Optional `<basename>.dscd.json` metadata is owned and parsed by `dscd` with
-`encoding/json` under `internal/reconcile`. Only `operation` has behavior today:
-exactly `set` or `test`. Missing metadata or an omitted operation defaults to
-`set`; unsupported properties are ignored. Metadata files, including orphans,
-are excluded from independent reconciliation. Metadata does not depend on the
-configuration or parameter serialization format. There is no YAML metadata:
-`*.dscd.yaml` retains its ordinary configuration meaning and `*.dscd.yml` is ignored.
+Optional `metadata.dscd` in each configuration is owned by `dscd` and extracted
+under `internal/reconcile`. Only `operation` has behavior today: exactly `set` or
+`test`. Missing metadata, missing `dscd`, empty objects, or an omitted operation
+defaults to `set`. Ignore unknown properties at every level, including arbitrary
+nested values. Validate known containers and operation values. Resolve YAML
+aliases and merges along the metadata path rather than silently enforcing `set`.
+Keep `.yaml` and `.json` configuration discovery; `.yml` remains ignored.
 
-For example, `web.yaml`, `web.parameters.yaml`, and `web.dscd.json` form one
-configuration input. To make it audit-only, the metadata contains:
+For example, `web.yaml` and `web.parameters.yaml` form one input. To make it
+audit-only, the configuration includes:
 
-```json
-{
-  "operation": "test"
-}
+```yaml
+metadata:
+  dscd:
+    operation: test
 ```
 
-**No metadata file means `set`: placing a configuration in the directory normally
+The companion `.dscd.json` mechanism is removed. Those files now follow ordinary
+`.json` discovery, not special exclusion or association rules.
+
+**No embedded operation means `set`: placing a configuration in the directory normally
 authorizes DSC to enforce that desired state.** Producers must publish audit-only
-metadata before its configuration. Malformed/unreadable metadata or an invalid
+metadata in the configuration itself. Malformed/unreadable input or an invalid
 explicit operation fails only that configuration, publishes an `input` failure
 without invoking DSC, and does not block later configurations. Never fall back to
 `set` for invalid metadata or log arbitrary metadata contents.
@@ -167,9 +169,10 @@ the daemon passes them unchanged.
 
 Prefer the standard library: `log/slog`, `context`, `os/exec`, `os`,
 `path/filepath`, `encoding/json`, `time`, `flag`, `os/signal`, and sorting helpers.
-The only non-standard dependency is `golang.org/x/sys` for Windows SCM, Event Log,
-Job Objects, protected ACLs and native replacement. Do not add a general service
-framework. Use the Go version declared in `go.mod` and CI.
+The non-standard dependencies are `golang.org/x/sys` for Windows SCM, Event Log,
+Job Objects, protected ACLs and native replacement, and `go.yaml.in/yaml/v3` for
+embedded metadata extraction. Do not add a general service framework or DSC schema
+dependency. Use the Go version declared in `go.mod` and CI.
 
 ## Configuration, logging, and results
 
@@ -205,7 +208,7 @@ Prioritize observable behavior:
 - Discovery, filtering, empty directories, and deterministic ordering: files
   created as `20-b.yaml` and `10-a.yaml` execute as `10-a.yaml`, `20-b.yaml`.
 - Continued processing after a document failure and publication of failure results.
-- Metadata association/defaults/validation, mixed operations within a session,
+- Embedded metadata extraction/defaults/validation, mixed operations within a session,
   operation-aware hashes, persisted operation, and successful tests reporting drift.
 - Immediate first reconciliation, a full interval after each completed pass,
   no catch-up or overlapping passes, and prompt cancellation during the wait.
@@ -216,7 +219,7 @@ Prioritize observable behavior:
 
 The DSC server compatibility target is stable 3.3.0, using the version-tagged
 official server tests and implementation linked in the design. Keep input snapshots
-bounded to 16 MiB combined, metadata to a separate 16 MiB, and stdout JSON-RPC
+bounded to 16 MiB combined (including embedded metadata), and stdout JSON-RPC
 frames to 16 MiB. Drain shared stderr
 without retaining it; per-attempt `stderr` stays empty and RPC-success `exitCode`
 stays null. Never log RPC error text which may contain secrets.

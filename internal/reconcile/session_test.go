@@ -110,13 +110,13 @@ func TestExactSnapshotSubmittedAfterReplacement(t *testing.T) {
 	dir := t.TempDir()
 	config := filepath.Join(dir, "a.yaml")
 	params := filepath.Join(dir, "a.parameters.json")
-	meta := filepath.Join(dir, "a.dscd.json")
-	for path, text := range map[string]string{config: "old configuration\n", params: "old parameters\n", meta: `{"operation":"test"}`} {
+	const original = "metadata:\n  dscd:\n    operation: test\nresources: []\n"
+	for path, text := range map[string]string{config: original, params: "old parameters\n"} {
 		if err := os.WriteFile(path, []byte(text), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	expected := dsc.Input{Configuration: config, Parameters: params, Operation: dsc.OperationTest, ConfigurationText: "old configuration\n", ParametersText: "old parameters\n"}
+	expected := dsc.Input{Configuration: config, Parameters: params, Operation: dsc.OperationTest, ConfigurationText: original, ParametersText: "old parameters\n"}
 	writer := &fakeWriter{}
 	start := func(context.Context) (DSC, error) {
 		// Startup occurs after the snapshot. Neither pathname may be reopened for this attempt.
@@ -126,13 +126,10 @@ func TestExactSnapshotSubmittedAfterReplacement(t *testing.T) {
 		if err := os.Remove(params); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(config, []byte("new configuration"), 0600); err != nil {
+		if err := os.WriteFile(config, []byte("metadata:\n  dscd:\n    operation: set\nresources: []\n"), 0600); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(params, []byte("new parameters"), 0600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(meta, []byte(`{"operation":"set"}`), 0600); err != nil {
 			t.Fatal(err)
 		}
 		return fakeDSC{run: func(_ context.Context, in dsc.Input) dsc.Result {

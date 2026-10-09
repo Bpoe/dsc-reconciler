@@ -12,15 +12,13 @@ import (
 )
 
 type candidate struct {
-	input        dsc.Input
-	metadataPath string
-	err          error
+	input dsc.Input
+	err   error
 }
 
 func configurationName(name string) bool {
 	if strings.HasPrefix(name, ".") ||
-		strings.HasSuffix(name, ".parameters.yaml") || strings.HasSuffix(name, ".parameters.json") ||
-		strings.HasSuffix(name, ".dscd.json") {
+		strings.HasSuffix(name, ".parameters.yaml") || strings.HasSuffix(name, ".parameters.json") {
 		return false
 	}
 	ext := filepath.Ext(name)
@@ -54,11 +52,7 @@ func discover(dir string) ([]candidate, error) {
 	candidates := make([]candidate, 0, len(names))
 	for _, name := range names {
 		base := strings.TrimSuffix(name, filepath.Ext(name))
-		item := candidate{input: dsc.Input{Configuration: filepath.Join(dir, name), Operation: dsc.OperationSet}}
-		if present[base+".dscd.json"] {
-			item.metadataPath = filepath.Join(dir, base+".dscd.json")
-			item.input.Operation = ""
-		}
+		item := candidate{input: dsc.Input{Configuration: filepath.Join(dir, name)}}
 		if configurations := byBase[base]; len(configurations) > 1 {
 			item.err = fmt.Errorf("configuration %q has ambiguous basename %q: multiple configuration files found: %s",
 				name, base, strings.Join(configurations, ", "))

@@ -6,9 +6,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func TestUnreadableMetadataFailsOnlyConfiguration(t *testing.T) {
+func TestUnreadableConfigurationWithMetadataFailsOnlyConfiguration(t *testing.T) {
 	dir := t.TempDir()
-	path := writeMetadata(t, dir, `{"operation":"test"}`)
+	path := writeInput(t, dir, "web.yaml", "metadata: {dscd: {operation: test}}\n")
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		t.Fatal(err)
@@ -22,5 +22,5 @@ func TestUnreadableMetadataFailsOnlyConfiguration(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	assertMetadataFailure(t, dir)
+	assertConfigurationFailure(t, dir, "web.yaml")
 }
