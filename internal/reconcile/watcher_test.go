@@ -3,12 +3,14 @@ package reconcile
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
@@ -18,6 +20,7 @@ type fakeEvents struct {
 	errors chan error
 	closed int
 	add    func(string) error
+	remove func(string) error
 }
 
 func newFakeEvents() *fakeEvents {
@@ -30,6 +33,12 @@ func (f *fakeEvents) source() (eventSource, error) {
 		add: func(dir string) error {
 			if f.add != nil {
 				return f.add(dir)
+			}
+			return nil
+		},
+		remove: func(dir string) error {
+			if f.remove != nil {
+				return f.remove(dir)
 			}
 			return nil
 		},
@@ -72,8 +81,9 @@ func TestCollectorFiltersAndCoalesces(t *testing.T) {
 			source.send(dir, event.name, event.op)
 		}
 		synctest.Wait()
-		want := map[string]map[string]struct{}{
+		want := map[string]inputChanges{
 			"web": changedNames("web.yaml", "web.parameters.json"), "second": changedNames("second.json"),
+			"nested/inside": changedNames("nested/inside.yaml"),
 		}
 		if got := pending.take(); !reflect.DeepEqual(got, want) {
 			t.Fatalf("pending=%v, want %v", got, want)
@@ -156,6 +166,48 @@ func TestDirectoryWatchIdentity(t *testing.T) {
 	}
 }
 
+func TestCollectorDrainsDuringTreeRegistration(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+			dir := t.TempDir()
+			input(t, dir, "nested/config.yaml")
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			source := newFakeEvents()
+			source.add = func(string) error {
+				if fail {
+					select {
+					case source.errors <- fsnotify.ErrEventOverflow:
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
+				for range 100 {
+					select {
+					case source.events <- fsnotify.Event{Name: filepath.Join(dir, "web.yaml"), Op: fsnotify.Write}:
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
+				return nil
+			}
+			w, err := startDirectoryWatch(ctx, dir, source.source, newPendingChanges())
+			if fail {
+				if !errors.Is(err, fsnotify.ErrEventOverflow) || w != nil || source.closed != 1 {
+					t.Fatalf("registration failure=%v, watcher=%v, closed=%d", err, w, source.closed)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := w.close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func TestDirectoryWatchSetupFailure(t *testing.T) {
 	for _, kind := range []string{"add", "replaced", "removed", "not directory"} {
 		t.Run(kind, func(t *testing.T) {
@@ -164,6 +216,7 @@ func TestDirectoryWatchSetupFailure(t *testing.T) {
 			if err := os.Mkdir(dir, 0700); err != nil {
 				t.Fatal(err)
 			}
+
 			source := newFakeEvents()
 			source.add = func(string) error {
 				if kind == "add" {

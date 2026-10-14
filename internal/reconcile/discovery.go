@@ -1,9 +1,12 @@
 package reconcile
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -12,9 +15,14 @@ import (
 )
 
 type candidate struct {
+	name  string // Slash-separated path relative to the configuration root.
 	input dsc.Input
 	err   error
 }
+
+// inputChanges maps relative input names to whether an explicit removal was
+// observed. Only explicit sidecar removal permits an absent-parameter attempt.
+type inputChanges map[string]bool
 
 func configurationName(name string) bool {
 	if strings.HasPrefix(name, ".") || parameterName(name) {
@@ -37,7 +45,7 @@ func parameterNames(base string) []string {
 }
 
 func changedBase(name string) (string, bool) {
-	if strings.HasPrefix(name, ".") {
+	if !visiblePath(name) {
 		return "", false
 	}
 	if parameterName(name) {
@@ -46,26 +54,75 @@ func changedBase(name string) (string, bool) {
 	return configurationBase(name), configurationName(name)
 }
 
+func visiblePath(name string) bool {
+	if !fs.ValidPath(name) || strings.ContainsAny(name, "\\\x00") || !filepath.IsLocal(filepath.FromSlash(name)) {
+		return false
+	}
+	for _, part := range strings.Split(name, "/") {
+		if strings.HasPrefix(part, ".") {
+			return false
+		}
+	}
+	return true
+}
+
+func relativeName(root, file string) (string, error) {
+	name, err := filepath.Rel(root, file)
+	if err != nil {
+		return "", err
+	}
+	return filepath.ToSlash(name), nil
+}
+
+func configurationLess(a, b string) bool {
+	if path.Base(a) != path.Base(b) {
+		return path.Base(a) < path.Base(b)
+	}
+	return a < b
+}
+
+func sortCandidates(items []candidate) {
+	sort.Slice(items, func(i, j int) bool { return configurationLess(items[i].name, items[j].name) })
+}
+
 // changedCandidates uses ordinary discovery, including its ambiguity checks.
 // Names are hints, not a cached list of inputs or permission to use deleted sidecars.
-func changedCandidates(dir string, names map[string]struct{}) ([]candidate, error) {
-	candidates, err := discover(dir)
-	if err != nil {
-		return nil, err
+func changedCandidates(dir string, names inputChanges) ([]candidate, error) {
+	directories := make(map[string]struct{})
+	for name := range names {
+		if _, ok := changedBase(name); ok {
+			directories[path.Dir(name)] = struct{}{}
+		}
+	}
+	var candidates []candidate
+	var scanErr error
+	for directory := range directories {
+		if err := checkInputDirectory(dir, directory); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				scanErr = errors.Join(scanErr, err)
+			}
+			continue
+		}
+		items, err := discoverDirectory(dir, filepath.Join(dir, filepath.FromSlash(directory)))
+		if !errors.Is(err, os.ErrNotExist) {
+			scanErr = errors.Join(scanErr, err)
+		}
+		candidates = append(candidates, items...)
 	}
 	affected := make(map[string]bool)
 	for _, item := range candidates {
-		name := filepath.Base(item.input.Configuration)
+		name := item.name
 		base := configurationBase(name)
 		if _, ok := names[name]; ok {
 			affected[base] = true
 		}
 		for _, parameter := range parameterNames(base) {
-			if _, ok := names[parameter]; !ok {
+			removed, ok := names[parameter]
+			if !ok {
 				continue
 			}
-			_, err := os.Lstat(filepath.Join(dir, parameter))
-			if !errors.Is(err, os.ErrNotExist) {
+			_, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(parameter)))
+			if removed || !errors.Is(err, os.ErrNotExist) {
 				// Unreadable/nonregular sidecars still need an input-failure result.
 				affected[base] = true
 			}
@@ -73,14 +130,87 @@ func changedCandidates(dir string, names map[string]struct{}) ([]candidate, erro
 	}
 	selected := candidates[:0]
 	for _, item := range candidates {
-		if affected[configurationBase(filepath.Base(item.input.Configuration))] {
+		if affected[configurationBase(item.name)] {
 			selected = append(selected, item)
 		}
 	}
-	return selected, nil
+	sortCandidates(selected)
+	return selected, scanErr
 }
 
 func discover(dir string) ([]candidate, error) {
+	return discoverTree(context.Background(), dir)
+}
+
+func discoverTree(ctx context.Context, dir string) ([]candidate, error) {
+	var candidates []candidate
+	err := walkDirectories(ctx, dir, func(directory string) error {
+		items, err := discoverDirectory(dir, directory)
+		candidates = append(candidates, items...)
+		return err
+	})
+	sortCandidates(candidates)
+	return candidates, err
+}
+
+// walkDirectories shares traversal rules with watch registration. Visit runs
+// before enumerating children so a watch can cover arrivals during enumeration.
+func walkDirectories(ctx context.Context, dir string, visit func(string) error) error {
+	var scanErr error
+	err := filepath.WalkDir(dir, func(file string, entry fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil {
+			scanErr = errors.Join(scanErr, fmt.Errorf("scan configuration tree %q: %w", file, err))
+			return nil
+		}
+		if file != dir && strings.HasPrefix(entry.Name(), ".") {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			if file == dir {
+				return fmt.Errorf("configuration root %q is not a regular directory", dir)
+			}
+			return nil
+		}
+		if err := visit(file); err != nil {
+			scanErr = errors.Join(scanErr, err)
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	return errors.Join(scanErr, err)
+}
+
+// Reject redirected ancestors as well as leaf symlinks. Producers are trusted;
+// this check is not a transaction with subsequent opens.
+func checkInputDirectory(root, directory string) error {
+	if directory != "." && !visiblePath(directory) {
+		return fmt.Errorf("invalid configuration directory %q", directory)
+	}
+	current := root
+	parts := []string{"."}
+	if directory != "." {
+		parts = append(parts, strings.Split(directory, "/")...)
+	}
+	for _, part := range parts {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return fmt.Errorf("inspect configuration directory %q: %w", current, err)
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("configuration directory %q is not a regular directory", current)
+		}
+	}
+	return nil
+}
+
+func discoverDirectory(root, dir string) ([]candidate, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("scan configuration directory %q: %w", dir, err)
@@ -107,7 +237,12 @@ func discover(dir string) ([]candidate, error) {
 	candidates := make([]candidate, 0, len(names))
 	for _, name := range names {
 		base := configurationBase(name)
-		item := candidate{input: dsc.Input{Configuration: filepath.Join(dir, name)}}
+		file := filepath.Join(dir, name)
+		id, err := relativeName(root, file)
+		if err != nil {
+			return nil, err
+		}
+		item := candidate{name: id, input: dsc.Input{Configuration: file}}
 		if configurations := byBase[base]; len(configurations) > 1 {
 			item.err = fmt.Errorf("configuration %q has ambiguous basename %q: multiple configuration files found: %s",
 				name, base, strings.Join(configurations, ", "))

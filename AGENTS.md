@@ -100,6 +100,12 @@ hash the captured UTF-8 strings and effective operation using the documented
 Hash the original document, including all metadata bytes, and the normalized
 `set`/`test` operation. Formatting and ignored-property edits change the submitted
 input identity, not the operation. The hash is not a skip key.
+Discover recursively, skipping dot-prefixed entries and directory symlinks.
+Pair and reject ambiguous basenames only within the same directory. Use
+slash-normalized relative paths for identities and mirror those paths under
+the results root. Sort all candidates globally by full filename, then relative
+path for ties; directory names and numeric parsing never set primary priority.
+Ordering does not create dependencies between configurations.
 Use `go.yaml.in/yaml/v3` nodes for YAML and `encoding/json` raw messages for JSON
 to extract metadata without modeling DSC resources. Never strip or reserialize inputs.
 
@@ -146,21 +152,30 @@ the daemon passes them unchanged.
 
 Filesystem watching is a low-latency optimization, not the correctness mechanism.
 Use the same discovery and single-candidate execution path for targeted and full
-passes. Keep all DSC work serial. Watch the directory using fsnotify; do not
-duplicate filename/sidecar rules in the collector. Create/Write events include
-atomic rename destinations; old-name Rename, Remove, and Chmod do not trigger
-immediate reconciliation. New pairs are published parameter-first; orphan
-sidecars do not execute or wait in a pairing queue. Never add a debounce delay.
+passes. Keep all DSC work serial. Use fsnotify on Linux and a build-tagged Windows
+`ReadDirectoryChangesW` subtree source with one root handle, feeding the same
+collector and scheduler. Never retain Windows descendant-directory handles.
+Do not duplicate filename/sidecar rules in the collector. Create/Write events
+include atomic rename destinations. Explicit sidecar Remove/old-name Rename
+triggers the associated configuration against current inputs; stale Create/Write
+hints alone must not authorize absent parameters. Configuration removal/old-name
+Rename and Chmod do not trigger execution. New pairs are published parameter-first;
+orphan sidecars do not execute or wait in a pairing queue. Never add a debounce delay.
 Coalesce pending notifications, but retain changes received during execution.
+Register visible subdirectories, queue existing inputs in newly arrived trees,
+and retire removed/hidden subtree watches on the scheduler, not the collector.
+The collector records topology hints without performing filesystem I/O.
 
 Targeted work does not reset the periodic full-pass timer; due full passes take
 priority after active work finishes. Revalidate the directory identity at every
 full-pass boundary, even without watcher errors; retire stale watches and retry
-registration before discovery. Log watcher failures and preserve periodic
-fallback. Collector notifications must never wait for the scheduler: use
-nonblocking wake-ups and independently stored pending state, and a nonblocking
+registration before discovery. Watch failure requests one immediate recovery
+full pass between scheduled passes; repeated/setup failures retain periodic
+fallback instead of rapid retries. Collector notifications must never wait for
+the scheduler: use nonblocking wake-ups and independently stored pending state, and a nonblocking
 failure signal. Keep mutex sections limited to in-memory state changes, never
-I/O, logging, execution, or cleanup. Close and join every owned watcher/collector.
+I/O, logging, execution, or cleanup. Close and join every owned watcher/collector,
+cancel and complete outstanding Windows I/O, and release all native handles.
 
 ## Go conventions
 
@@ -190,8 +205,9 @@ Prefer the standard library: `log/slog`, `context`, `os/exec`, `os`,
 `path/filepath`, `encoding/json`, `time`, `flag`, `os/signal`, and sorting helpers.
 The non-standard dependencies are `golang.org/x/sys` for Windows SCM, Event Log,
 Job Objects, protected ACLs and native replacement, and `go.yaml.in/yaml/v3` for
-embedded metadata extraction, and `github.com/fsnotify/fsnotify` for directory
-notifications on Linux and Windows. Do not add a general service framework or DSC schema
+embedded metadata extraction, and `github.com/fsnotify/fsnotify` for Linux
+directory notifications and shared event types. Windows notifications use
+`golang.org/x/sys/windows`. Do not add a general service framework or DSC schema
 dependency. Use the Go version declared in `go.mod` and CI.
 
 ## Configuration, logging, and results

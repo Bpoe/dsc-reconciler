@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/Bpoe/dsc-reconciler/internal/dsc"
 )
@@ -29,7 +29,11 @@ func NewWriter(dir string) (*Writer, error) {
 	if err := makeDirectory(dir); err != nil {
 		return nil, fmt.Errorf("prepare results directory %q: %w", dir, err)
 	}
-	w := &Writer{dir: dir}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve results directory %q: %w", dir, err)
+	}
+	w := &Writer{dir: resolved}
 	if err := w.probe(); err != nil {
 		return nil, fmt.Errorf("probe results directory %q: %w", dir, err)
 	}
@@ -37,7 +41,7 @@ func NewWriter(dir string) (*Writer, error) {
 }
 
 func (w *Writer) probe() (err error) {
-	f, err := w.createTemp()
+	f, err := createTemp(w.dir)
 	if err != nil {
 		return err
 	}
@@ -55,7 +59,7 @@ func (w *Writer) probe() (err error) {
 	if err = errors.Join(syncErr, closeErr); err != nil {
 		return err
 	}
-	target, err := w.createTemp()
+	target, err := createTemp(w.dir)
 	if err != nil {
 		return err
 	}
@@ -67,20 +71,59 @@ func (w *Writer) probe() (err error) {
 	return err
 }
 
-// Destination maps a source basename to its complete result path without collisions.
+// Destination maps a normalized relative source name to its mirrored result path.
 func (w *Writer) Destination(name string) (string, error) {
-	if name == "" || name == "." || name == ".." || !utf8.ValidString(name) || strings.ContainsAny(name, "/\\\x00") {
-		return "", fmt.Errorf("invalid source basename %q", name)
+	if name == "." || !fs.ValidPath(name) || strings.ContainsAny(name, "\\\x00") {
+		return "", fmt.Errorf("invalid relative source name %q", name)
 	}
 	name += ".result.json"
-	path := filepath.Join(w.dir, name)
-	if err := validateDestination(name, path); err != nil {
-		return "", err
+	local, err := filepath.Localize(name)
+	if err != nil {
+		return "", fmt.Errorf("invalid relative source name %q: %w", name, err)
+	}
+	path := filepath.Join(w.dir, local)
+	for _, part := range strings.Split(name, "/") {
+		if err := validateDestination(part, path); err != nil {
+			return "", err
+		}
 	}
 	return path, nil
 }
 
-// Write syncs a private temporary file before replacing the old result.
+func (w *Writer) prepareDirectory(dir string) error {
+	relative, err := filepath.Rel(w.dir, dir)
+	if err != nil {
+		return err
+	}
+	if !filepath.IsLocal(relative) {
+		return fmt.Errorf("result directory %q is outside results root", dir)
+	}
+	current := w.dir
+	parts := []string{"."}
+	if relative != "." {
+		parts = append(parts, strings.Split(relative, string(filepath.Separator))...)
+	}
+	for _, part := range parts {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			if err := makeDirectory(current); err != nil {
+				return err
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("result directory %q is not a regular directory", current)
+		}
+	}
+	return nil
+}
+
+// Write serializes the result and syncs a private temporary file in the target
+// directory before replacing the old result.
 // Context cancellation is checked between filesystem operations, not inside syscalls.
 func (w *Writer) Write(ctx context.Context, result dsc.Result) (err error) {
 	target, err := w.Destination(result.Configuration)
@@ -90,7 +133,15 @@ func (w *Writer) Write(ctx context.Context, result dsc.Result) (err error) {
 	if err = ctx.Err(); err != nil {
 		return err
 	}
-	f, err := w.createTemp()
+	content, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("serialize result %q: %w", target, err)
+	}
+	dir := filepath.Dir(target)
+	if err := w.prepareDirectory(dir); err != nil {
+		return fmt.Errorf("prepare result directory %q: %w", dir, err)
+	}
+	f, err := createTemp(dir)
 	if err != nil {
 		return err
 	}
@@ -109,7 +160,7 @@ func (w *Writer) Write(ctx context.Context, result dsc.Result) (err error) {
 			err = fmt.Errorf("publish result %q: %w", target, err)
 		}
 	}()
-	if err = json.NewEncoder(f).Encode(result); err != nil {
+	if _, err = f.Write(append(content, '\n')); err != nil {
 		return err
 	}
 	if err = ctx.Err(); err != nil {
@@ -133,16 +184,16 @@ func (w *Writer) Write(ctx context.Context, result dsc.Result) (err error) {
 		}
 		return err
 	}
-	if err = syncDirectory(w.dir); err != nil {
+	if err = syncDirectory(dir); err != nil {
 		return fmt.Errorf("replacement is visible but directory durability is uncertain: %w", err)
 	}
 	return nil
 }
 
-func (w *Writer) createTemp() (*os.File, error) {
-	f, err := os.CreateTemp(w.dir, ".dscd-*")
+func createTemp(dir string) (*os.File, error) {
+	f, err := os.CreateTemp(dir, ".dscd-*")
 	if err != nil {
-		return nil, fmt.Errorf("create temporary result in %q: %w", w.dir, err)
+		return nil, fmt.Errorf("create temporary result in %q: %w", dir, err)
 	}
 	if err = protectFile(f.Name()); err != nil {
 		return nil, fmt.Errorf("protect temporary result: %w", errors.Join(err, f.Close(), os.Remove(f.Name())))

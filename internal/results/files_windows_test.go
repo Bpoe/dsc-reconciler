@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -26,8 +27,14 @@ func readShared(path string) ([]byte, error) {
 }
 
 func TestSharingViolationPreservesPreviousResult(t *testing.T) {
+	for _, name := range []string{"a.yaml", "nested/deep/a.yaml"} {
+		t.Run(name, func(t *testing.T) { testSharingViolationPreservesPreviousResult(t, name) })
+	}
+}
+
+func testSharingViolationPreservesPreviousResult(t *testing.T, configuration string) {
 	writer := newTestWriter(t)
-	result := testResult("a.yaml", "succeeded")
+	result := testResult(configuration, "succeeded")
 	if err := writer.Write(context.Background(), result); err != nil {
 		t.Fatal(err)
 	}
@@ -63,12 +70,12 @@ func TestSharingViolationPreservesPreviousResult(t *testing.T) {
 
 func TestProtectedDACL(t *testing.T) {
 	writer := newTestWriter(t)
-	result := testResult("a.yaml", "succeeded")
+	result := testResult("team/deep/a.yaml", "succeeded")
 	if err := writer.Write(context.Background(), result); err != nil {
 		t.Fatal(err)
 	}
 	path, _ := writer.Destination(result.Configuration)
-	for _, path := range []string{writer.dir, path} {
+	for _, path := range []string{writer.dir, filepath.Join(writer.dir, "team"), filepath.Dir(path), path} {
 		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 		if err != nil {
 			t.Fatal(err)
@@ -83,7 +90,11 @@ func TestProtectedDACL(t *testing.T) {
 		}
 		got := strings.ReplaceAll(sd.String(), "D:PAI", "D:P")
 		want := expected.String()
-		if path != writer.dir {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.IsDir() {
 			want = strings.ReplaceAll(want, ";OICI;", ";;")
 		}
 		if got != want {
@@ -94,7 +105,8 @@ func TestProtectedDACL(t *testing.T) {
 
 func TestReservedWindowsNames(t *testing.T) {
 	w := newTestWriter(t)
-	for _, name := range []string{"NUL.yaml", "COM1.json", "LPT\u00b9.yml", "x:stream.yaml", "x?.yaml"} {
+	for _, name := range []string{"NUL.yaml", "COM1.json", "LPT\u00b9.yml", "x:stream.yaml", "x?.yaml",
+		"NUL/a.yaml", "COM1/a.yaml", "x:stream/a.yaml", "x./a.yaml", "x /a.yaml"} {
 		if _, err := w.Destination(name); err == nil {
 			t.Errorf("accepted reserved name %q", name)
 		}
