@@ -12,10 +12,10 @@ import (
 	"github.com/Bpoe/dsc-reconciler/internal/dsc"
 )
 
-func changedNames(names ...string) map[string]struct{} {
-	changed := make(map[string]struct{}, len(names))
+func changedNames(names ...string) inputChanges {
+	changed := make(inputChanges, len(names))
 	for _, name := range names {
-		changed[name] = struct{}{}
+		changed[name] = false
 	}
 	return changed
 }
@@ -47,6 +47,7 @@ func TestTargetedSelection(t *testing.T) {
 			for _, name := range test.files {
 				input(t, dir, name)
 			}
+
 			var calls []string
 			client := fakeDSC{run: func(_ context.Context, in dsc.Input) dsc.Result {
 				calls = append(calls, filepath.Base(in.Configuration))
@@ -73,6 +74,58 @@ func TestTargetedSelection(t *testing.T) {
 				}
 			} else if !reflect.DeepEqual(calls, test.want) {
 				t.Fatalf("executed %v, want %v", calls, test.want)
+			}
+		})
+	}
+}
+
+func TestExplicitParameterRemovalSelection(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		files     []string
+		removed   string
+		parameter string
+		want      []string
+		fail      bool
+	}{
+		{"last sidecar", []string{"team/web.yaml"}, "team/web.parameters.json", "", []string{"team/web.yaml"}, false},
+		{"remaining yaml", []string{"team/web.yaml", "team/web.parameters.yaml"}, "team/web.parameters.json", "team/web.parameters.yaml", []string{"team/web.yaml"}, false},
+		{"remaining json", []string{"team/web.json", "team/web.parameters.json"}, "team/web.parameters.yaml", "team/web.parameters.json", []string{"team/web.json"}, false},
+		{"orphan", nil, "team/web.parameters.yaml", "", nil, false},
+		{"duplicate configurations", []string{"team/web.yaml", "team/web.json"}, "team/web.parameters.yaml", "", []string{"team/web.json", "team/web.yaml"}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			input(t, dir, "unrelated/web.yaml")
+			for _, name := range test.files {
+				input(t, dir, name)
+			}
+			var calls []dsc.Input
+			client := fakeDSC{run: func(_ context.Context, in dsc.Input) dsc.Result {
+				calls = append(calls, in)
+				return dsc.Result{Outcome: "succeeded"}
+			}}
+			writer := &fakeWriter{}
+			r := New(dir, time.Hour, client.start, writer, logger())
+			if err := r.changed(context.Background(), inputChanges{test.removed: true}); err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, result := range writer.results {
+				got = append(got, result.Configuration)
+				if result.Parameters != test.parameter {
+					t.Fatalf("parameters=%q, want %q", result.Parameters, test.parameter)
+				}
+			}
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("targeted=%v, want %v", got, test.want)
+			}
+			if test.fail {
+				if len(calls) != 0 {
+					t.Fatal("removal bypassed input ambiguity")
+				}
+			} else if len(calls) != len(test.want) {
+				t.Fatalf("execution count=%d, want %d", len(calls), len(test.want))
 			}
 		})
 	}

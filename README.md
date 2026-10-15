@@ -56,8 +56,8 @@ such as `dscd v0.0.2`; unstamped source builds report `dscd dev`.
 
 ### Add configurations
 
-As an administrator, publish your DSC `.yaml` or `.json` documents directly in
-the input directory created by the installer:
+As an administrator, publish your DSC `.yaml` or `.json` documents in
+the input directory created by the installer, or in visible subdirectories:
 - **Linux:** `/etc/dsc/config.d`
 - **Windows:** `%ProgramData%\dsc\config.d`
 
@@ -100,6 +100,14 @@ Get-Content "$env:ProgramData\dsc\results.d\web.yaml.result.json" -Raw |
     ConvertFrom-Json | Format-List
 ```
 
+Nested configurations keep their relative directory structure: for example,
+`managed/networking/dns.json` writes
+`managed/networking/dns.json.result.json` beneath the results directory.
+The `configuration` and optional `parameters` fields use `/`-separated paths
+relative to the input root on both platforms. Root-level names are unchanged.
+Result parents are created with private permissions. Results are atomically
+replaced, and deleting an input does not delete its historical result.
+
 # Development
 
 ## Prerequisites and compatibility
@@ -127,8 +135,9 @@ supported. There is no per-document process fallback.
 file replacement. `go.yaml.in/yaml/v3` provides YAML syntax parsing and embedded
 metadata extraction without modeling DSC resources; JSON uses the standard
 library's `encoding/json`.
-`github.com/fsnotify/fsnotify` (pinned to v1.10.1) supplies directory notifications
-using Linux inotify and Windows ReadDirectoryChangesW.
+`github.com/fsnotify/fsnotify` (pinned to v1.10.1) supplies Linux inotify
+notifications. Windows uses `golang.org/x/sys/windows` for one asynchronous
+`ReadDirectoryChangesW` root watch with `bWatchSubtree=TRUE`.
 
 ## Build and check
 
@@ -382,11 +391,20 @@ standard data root, with `C:\ProgramData` as fallback. Input and output director
 must be separate and non-nested; aliases through existing symlinks are resolved.
 Only one daemon instance may own a directory pair; no multi-process lock is provided.
 
-Discovery is nonrecursive. Ordinary files ending in case-sensitive `.yaml` or
-`.json` are eligible; `.dsc.` is not required in filenames. Hidden names,
-directories, symlinks, `.yml` files, uppercase extensions and temporary suffixes
-such as `.yaml.tmp` are ignored. Go string ordering puts
-`10-a.yaml` before `20-b.yaml`. Each pass rediscovers documents; unchanged files
+Discovery is recursive, with no daemon-imposed depth limit. Ordinary files ending
+in case-sensitive `.yaml` or `.json` are eligible; `.dsc.` is not required in
+filenames. Dot-prefixed entries are ignored at every level, including all
+descendants of hidden directories. Symlinks are not followed. `.yml` files,
+uppercase extensions and temporary suffixes such as `.yaml.tmp` are ignored.
+All configurations are sorted together by **filename**, using Go string ordering;
+identical filenames use `/`-normalized relative paths as a deterministic tie-breaker.
+For example, `20-security/10-baseline.yaml` executes before
+`10-managed/20-baseline.yaml`, followed by `30-local.yaml`. Directory names never
+set primary priority, and no numeric priority parsing is performed.
+Ordering does not establish dependencies: changing `30-app.yaml` does not
+execute an unchanged `10-preparation.yaml`.
+
+Each pass rediscovers documents; unchanged files
 are executed with their effective operation because machine state may drift.
 Reconcile all configurations immediately on startup, then wait the full interval
 after each completed full pass before starting the next.
@@ -415,9 +433,10 @@ security.json   (no sidecar)
 web.yaml        + web.parameters.json
 ```
 
-Names match exactly, case-sensitively; formats may differ. Both parameter formats
+Names match exactly, case-sensitively, **within the same directory**; formats may differ. Both parameter formats
 for one basename are an error, not a precedence choice. `web.yaml` and `web.json`
-together are also invalid, with or without a sidecar. Affected configurations
+together in one directory are also invalid, with or without a sidecar.
+Identical basenames in different directories are independent. Affected configurations
 receive failed input results and unrelated configurations continue. Orphan
 sidecars are ignored. Missing/unreadable or nonregular selected sidecars fail
 rather than silently falling back to parameter defaults.
@@ -426,35 +445,56 @@ rather than silently falling back to parameter defaults.
 
 Watching is enabled automatically on Linux and Windows. Creating, modifying, or
 atomically replacing a configuration triggers only that configuration. Creating,
-modifying, or replacing a parameter sidecar triggers its associated configuration
-if present. The same discovery, ambiguity checks, metadata extraction, input
+modifying, replacing, deleting, or moving away a parameter sidecar triggers its
+associated configuration if present. The same discovery, ambiguity checks, metadata extraction, input
 snapshots, DSC execution, and result publication apply to both targeted and full
 passes. Unrelated configurations are not executed or republished.
 
-The daemon watches the directory, not individual files, so temporary-file rename
-and replacement patterns continue to work. Hidden/temporary names, unsupported
-extensions, unrelated files, and attribute-only changes are ignored. Deletion
-does not trigger an immediate attempt; periodic discovery observes removals.
-Historical results are retained. An orphan sidecar does not wait in a pairing
-queue for a future configuration.
+Linux registers directory watches throughout the visible input tree. Windows
+watches the entire tree with one root-directory handle and no descendant handles,
+so moving a directory together with its descendants remains possible. Neither
+platform watches individual files. A new or newly visible directory has its
+existing configurations queued; removed or hidden subtrees are retired from
+tracking. Dot-prefixed subtrees are never traversed or individually registered;
+Windows subtree notifications involving them are filtered by the collector.
+Hidden/temporary files, unsupported extensions, unrelated files, and
+attribute-only changes are ignored.
+Configuration deletion stops future attempts without undoing machine state.
+Explicit sidecar deletion or rename-away immediately queues the associated
+configuration, using any remaining unambiguous sidecar or no parameters.
+A stale Create/Write hint for an already-missing sidecar does not authorize
+an absent-parameter attempt. Historical results are retained. An orphan sidecar
+does not wait in a pairing queue for a future configuration.
 
 All work is serial, including DSC startup, publication, and session cleanup.
 Targeted work never resets the full-pass timer. If a full pass becomes due while
 targeted work is running, it runs after that work finishes and before more
 targeted attempts. Each targeted dispatch uses a short-lived session; no DSC
 server is retained while waiting. Pending notifications for the same
-configuration coalesce without a debounce delay. A notification during an
-attempt can cause a follow-up; exactly one execution per logical save is not
-guaranteed.
+configuration coalesce without a debounce delay. Finite batches use the same
+global filename ordering as full passes, not extensionless basename ordering.
+A notification during an attempt can cause a follow-up; exactly one execution
+per logical save is not guaranteed.
 
 The collector continues draining notifications while DSC is busy. It records
 pending names and uses a nonblocking wake-up signal; watcher failure notification
 also never waits for the scheduler. Watcher errors, overflow, or lost watches
-are logged but do not stop periodic reconciliation. At every scheduled full
-pass, the daemon checks the directory's filesystem identity even if no watcher
-error was reported. It retires stale watches and attempts to establish a fresh
-watch before scanning. Unavailable directories are retried at later full passes,
+request a full rediscovery/re-registration pass after active work finishes.
+Only one immediate recovery is attempted between scheduled full passes; setup
+failure or another failure in that window falls back to the periodic timer
+rather than a rapid retry loop. Recovery full passes reset the interval just
+like scheduled full passes. At every scheduled full pass, the daemon checks
+the root and registered subdirectories' filesystem
+identities even if no watcher error was reported, and registers missed directories.
+It retires stale watches and attempts fresh registration before scanning.
+Unavailable directories are retried at later full passes,
 without a separate retry timer or parent-directory watch.
+
+Windows keeps an overlapped read armed before delivering notifications, reports
+notification-buffer overflow as watch failure, and cancels and joins outstanding
+I/O before releasing handles on shutdown. Input snapshots and short-lived
+directory identity checks permit delete sharing, so they do not conflict with
+a producer's still-open atomic-rename handle.
 
 For a new pair, publish complete parameters first and then publish the
 configuration. Updating parameters for an **existing** configuration intentionally
@@ -566,7 +606,9 @@ The additive `operation` field records the effective operation, including implic
 `set`, and always matches the operation submitted when DSC is invoked. It is
 `null` when invalid metadata or an earlier input failure prevents resolving an
 operation; no DSC invocation occurs in that case.
-Two fields are included when available: `parameters` is the sidecar basename,
+`configuration` and optional `parameters` identify paths relative to the input
+root, using `/` on both platforms. Root-level identifiers are unchanged.
+Two fields are included when available: `parameters` is the selected sidecar path,
 and `inputHash` is the combined SHA-256 identity of the exact submitted
 configuration/parameter bytes and effective operation. Changing parameters or
 switching `set`/`test` changes the identity; absent and empty parameters differ.

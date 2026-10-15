@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -27,6 +28,7 @@ func (f fakeDSC) Close() error                       { return nil }
 func (f fakeDSC) start(context.Context) (DSC, error) { return f, nil }
 
 type fakeWriter struct {
+	mu      sync.Mutex
 	results []dsc.Result
 	write   func(context.Context, dsc.Result) error
 }
@@ -39,11 +41,25 @@ func (w *fakeWriter) Destination(name string) (string, error) {
 }
 
 func (w *fakeWriter) Write(ctx context.Context, result dsc.Result) error {
+	w.mu.Lock()
 	w.results = append(w.results, result)
+	w.mu.Unlock()
 	if w.write != nil {
 		return w.write(ctx, result)
 	}
 	return nil
+}
+
+func (w *fakeWriter) snapshot() []dsc.Result {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]dsc.Result(nil), w.results...)
+}
+
+func (w *fakeWriter) reset() {
+	w.mu.Lock()
+	w.results = nil
+	w.mu.Unlock()
 }
 
 func logger() *slog.Logger { return slog.New(slog.NewJSONHandler(io.Discard, nil)) }
@@ -62,7 +78,10 @@ func input(t *testing.T, dir, name string) {
 
 func writeInput(t *testing.T, dir, name, text string) string {
 	t.Helper()
-	path := filepath.Join(dir, name)
+	path := filepath.Join(dir, filepath.FromSlash(name))
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte(text), 0600); err != nil {
 		t.Fatal(err)
 	}

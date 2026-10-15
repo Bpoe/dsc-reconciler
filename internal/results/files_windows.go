@@ -74,7 +74,7 @@ func validateDestination(name, path string) error {
 	if len(utf16.Encode([]rune(longPath(path)))) >= 32767 {
 		return fmt.Errorf("result path exceeds the Windows extended-path limit: %q", path)
 	}
-	if strings.ContainsAny(name, `<>:"|?*`) {
+	if strings.ContainsAny(name, `<>:"|?*`) || strings.HasSuffix(name, ".") || strings.HasSuffix(name, " ") {
 		return fmt.Errorf("invalid Windows result basename %q", name)
 	}
 	for _, r := range name {

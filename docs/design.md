@@ -129,11 +129,23 @@ and a nonzero exit. Successful startup leads to an immediate reconciliation pass
 
 ## Discovery and reconciliation
 
-Scan direct children of `ConfigDir`. Ordinary files with case-sensitive `.yaml`
+Recursively scan `ConfigDir`, without an arbitrary directory-depth limit.
+Ordinary files with case-sensitive `.yaml`
 or `.json` extensions are configuration documents; `.dsc.` is not required in
-filenames. Ignore directories, symlinks, hidden names, `.yml` files and temporary
-suffixes such as `example.yaml.tmp`. Sort configurations by filename using Go
-string ordering.
+filenames. Ignore symlinks, dot-prefixed files, `.yml` files and temporary
+suffixes such as `example.yaml.tmp`. Never traverse dot-prefixed directories or
+follow directory symlinks. A dot elsewhere in an entry name is not an exclusion.
+Collect all configurations into a global list sorted by filename using Go string
+ordering, then by `/`-normalized relative path for equal filenames. Root and
+nested inputs can interleave: `20-security/10-baseline.yaml`,
+`15-local.json`, `10-managed/20-baseline.yaml`. Do not parse numeric priorities
+or infer prerequisites from ordering.
+
+The normalized relative path is the configuration identity. Native paths are
+used for filesystem access, and configuration indexing, pending notifications,
+result identities and ordering use normalized relative paths. Reject absolute
+paths, traversal components and redirected ancestors before targeted reads or
+result publication. Root-level identities remain unchanged.
 
 The suffixes `*.parameters.yaml` and `*.parameters.json` are reserved for
 parameter sidecars. These files
@@ -145,10 +157,11 @@ serialization formats may differ: `web.yaml` with `web.parameters.json` is valid
 Daemon metadata is embedded in the configuration, not associated by filename.
 
 Duplicate parameter formats are an error; there is no precedence. Duplicate
-configuration basenames (`web.yaml` and `web.json`) are also an error, even
+configuration basenames (`web.yaml` and `web.json`) in the same directory are also an error, even
 without a parameter file. Discovery records an input failure for each affected
 configuration, naming the conflicting files; none is executed, and unrelated
-configurations continue. A selected sidecar that is a directory, symlink or
+configurations continue. Identical basenames in different directories do not
+conflict and cannot share sidecars. A selected sidecar that is a directory, symlink or
 unreadable file is an input failure, not permission to silently use defaults.
 
 Each pass uses that ordered list and runs one document at a time. Recheck that a
@@ -157,6 +170,9 @@ files before reading them once into memory; if any disappeared or became unreada
 record an input failure and continue. This is operational
 validation, not a security boundary against a malicious local writer. Trusted
 producers must publish using temporary files and replacement, not in-place edits.
+Unreadable subdirectories produce a pass-level scan error; other discovered
+configurations are still attempted. Input and parameter capture remain bounded
+and unchanged.
 
 `dscd` remains the long-running daemon. Each nonempty pass normally uses one
 short-lived `dsc server`, started lazily before its first executable configuration.
@@ -200,7 +216,7 @@ Every pass rediscovers inputs. File changes also trigger targeted reconciliation
 the daemon does not cache a permanent document list or skip unchanged documents,
 because machine state may drift even when a file has not changed.
 
-Removal stops future attempts and does not undo machine changes. Existing result
+Configuration removal stops future attempts and does not undo machine changes. Existing result
 files remain until a producer or operator removes them. They are historical
 evidence of a last attempt, not proof that the corresponding input still exists.
 Renaming a document creates a new identity and leaves the old result behind.
@@ -214,24 +230,56 @@ delay. Targeted work uses the same per-configuration attempt operation as full
 passes: destination validation, input capture, metadata parsing, hashing, DSC
 invocation, logging, and publication are not duplicated.
 
-`github.com/fsnotify/fsnotify` v1.10.1 watches `ConfigDir` nonrecursively using
-inotify on Linux and ReadDirectoryChangesW on Windows. Watch the directory rather
-than individual files. Its Create and Write event bits are eligible triggers;
+Build-tagged event sources feed the same collector and scheduler.
+`github.com/fsnotify/fsnotify` v1.10.1 registers each visible directory using
+inotify on Linux. Windows uses one root handle and asynchronous
+`ReadDirectoryChangesW` with `bWatchSubtree=TRUE`, through the existing
+`golang.org/x/sys/windows` dependency. Descendant registrations only track
+topology: Windows never retains their handles, which would obstruct parent
+directory moves even with delete sharing.
+
+The scheduler registers before enumerating children and discovers populated
+directories when they arrive. Dot-prefixed directories are not traversed or
+individually registered; the Windows root receives subtree notifications, and
+the collector filters every relative path component. Watch directories rather
+than individual files. Create and Write event bits are eligible input triggers;
 rename destinations are reported as Create, so temporary-file publication and
-atomic replacement work. Old-name Rename, Remove, and attribute-only Chmod
-events do not trigger input execution. Root-directory removal/rename is handled
-as watch loss instead.
+atomic replacement work. Explicit Remove or old-name Rename for a parameter
+sidecar triggers its associated configuration against current inputs, including
+no parameters if the sidecar is absent. Configuration Remove/old-name Rename
+and attribute-only Chmod do not trigger execution. Remove/Rename hints retire
+obsolete subtree watches; root-directory removal/rename is handled as watch loss instead.
+Creating a directory or renaming it into visibility queues only configurations
+in that subtree. Renaming into a dot-prefixed name makes its contents ineligible.
+
+The Windows source uses a DWORD-aligned 64-KiB notification buffer and validates
+record offsets, lengths, UTF-16 names and relative paths. Added/renamed-new,
+modified, removed and renamed-old records become the same event types used on
+Linux. A zero-byte completion or `ERROR_NOTIFY_ENUM_DIR` signals overflow.
+Malformed buffers or other read failures also request recovery, never a
+success-shaped fallback. Rearm the read before delivering a decoded batch.
+Shutdown wakes the read loop, calls `CancelIoEx`, waits for completion, joins
+the reader and then closes the root and event handles. No persistent descendant
+handle or separate execution pipeline is introduced.
+
+Windows snapshot reads and short-lived directory identity handles use
+`FILE_SHARE_DELETE` along with read/write sharing. A rename notification may
+arrive before the producer closes its rename handle; delete sharing permits
+immediate capture without adding a retry/debounce delay.
 
 Reuse discovery's exact case-sensitive naming, configuration eligibility, and
 sidecar association rules. Rediscover current inputs and select only the affected
-basename; scanning directory entries is acceptable, but unrelated configurations
-must not be read, executed, or republished. Ambiguous configuration basenames
+directory-local basename; scanning those directories is acceptable, but unrelated
+configurations must not be read, executed, or republished. Ambiguous configuration basenames
 produce input failures for every affected configuration, and ambiguous sidecars
 retain their existing failure semantics. A changed configuration that has
 disappeared or become an ignored entry is not attempted; an existing selected
-sidecar that is unreadable/nonregular still produces an input failure. Pending
-notifications for a sidecar already removed do not authorize a default-parameter
-attempt.
+sidecar that is unreadable/nonregular still produces an input failure. The
+coalesced pending state retains whether explicit sidecar removal was observed.
+Only explicit removal/rename-away or a configuration change permits an
+absent-parameter targeted attempt; stale Create/Write hints alone do not.
+Removing one of two ambiguous parameter formats triggers selection of the
+remaining sidecar, while removing an orphan selects no work.
 
 Creating/modifying a sidecar without an associated configuration selects no work.
 Do not retain it in a pairing queue. To publish a **new** pair, publish complete
@@ -243,13 +291,18 @@ not an atomic multi-file transaction. In-place modifications are observed but
 can expose incomplete input; trusted producers should use temporary replacement.
 
 One collector drains filesystem events independently of the serial scheduler.
-It uses shared naming helpers to insert affected names into a deduplicated
-pending set and performs no directory scans, input reads, DSC calls, logging, or
+It uses shared naming helpers to insert affected relative names into a deduplicated
+pending set and records Create/Remove/Rename topology hints for arbitrary visible
+entry names. Only the scheduler inspects these hints and adds or removes watches.
+The collector performs no directory scans, input reads, DSC calls, logging, or
 publication. Changes use a capacity-one nonblocking wake-up signal; the pending
 set remains authoritative if a wake-up coalesces. Watcher failure is stored
-before closing a completion channel, which is also nonblocking and remains
-observable until the scheduler handles it. Thus neither changes nor errors wait
-for the scheduler to receive a message.
+before closing a failure channel, which is also nonblocking and remains
+observable until the scheduler handles it. The collector continues draining
+backend events after failure until the owner closes it, so synchronous watch
+registration/removal cannot deadlock behind an abandoned event channel.
+A separate completion channel joins the collector. Thus neither changes nor
+errors wait for the scheduler to receive a message.
 
 Shared-state mutexes protect only in-memory state transfer. Never hold them
 across filesystem access, sorting, logging, DSC execution, publication, watcher
@@ -259,27 +312,36 @@ during an attempt pending for a follow-up. There is no debounce or hash-based
 skip; exactly-once execution per logical save is not guaranteed.
 
 Full passes and targeted dispatches never overlap, including session startup,
-publication, and cleanup. Each targeted dispatch handles one affected basename
-and closes its short-lived session before returning. A due full pass takes
+publication, and cleanup. Each finite targeted batch selects affected configuration
+identities in the same global filename order as full passes. Each dispatch
+rediscovers and handles one configuration and closes its short-lived session
+before returning. A due full pass takes
 priority over additional targeted work after the active attempt finishes.
+An explicitly requested watcher-recovery full pass has the same priority.
 Targeted work never resets the periodic timer. Full passes alone reset it after
 completion, with no fixed-rate catch-up behavior.
 
 Register the watch before initial discovery. Capture directory identity through
 short-lived handles before and after watch registration and reject a mismatch.
-Before **every scheduled full pass**, inspect the current directory and compare
-filesystem identity with the registered identity, even if no watcher error or
-root rename was reported. Path equality or timestamps are not an identity test.
-Close identity handles promptly so they do not prevent Windows replacement.
+Before **every scheduled full pass**, inspect the root and registered directories
+and compare filesystem identities with their registered identities, even if no
+watcher error or root rename was reported. Path equality or timestamps are not an identity test.
+Close identity handles promptly. Add watches for any visible directories whose
+creation notification was missed before full discovery.
 
 Setup failure, overflow, closed channels, root-watch loss, identity mismatch, or
 an uninspectable directory is logged and does not terminate the daemon. Retire
-the stale watcher and attempt registration at the next full-pass boundary; an
-identity mismatch found at that boundary permits fresh registration immediately
-before discovery. If the directory is still unavailable, the full-pass attempt
-retains its normal failure behavior and registration is retried at the following
-boundary. No rapid retry timer, recursive watch, or parent-directory watch is
-added. Pending names are only hints and resolve against the current configured
+the stale watcher. Failure of an established watch requests an immediate full
+rediscovery/re-registration pass, after active execution/publication/cleanup
+finishes. Its full discovery covers hints queued before recovery; notifications
+arriving during recovery remain pending. At most one immediate recovery runs
+between scheduled full passes. If registration fails or the replacement watch
+fails again, retain periodic fallback rather than entering a rapid retry loop.
+An identity mismatch at a scheduled boundary permits fresh registration before
+discovery. If the directory is unavailable, the full-pass attempt retains its
+normal failure behavior and registration is retried at the following boundary.
+No separate retry timer or parent-directory watch is added.
+Pending names are only hints and resolve against the current configured
 directory. This supplies eventual recovery after silent root replacement, not
 instantaneous recovery of the fast path. Cancellation closes the watcher and
 joins the collector without waiting for a scheduler acknowledgment.
@@ -453,17 +515,22 @@ Documents must not rely on the old CLI's implicit file-root context.
 
 ## Result contract
 
-Each source has one latest-result file. Append `.result.json` to its full basename:
+Each source has one latest-result file. Mirror its relative directory beneath
+`ResultsDir` and append `.result.json` to its full filename:
 
 ```text
 10-network.yaml -> 10-network.yaml.result.json
 10-network.json -> 10-network.json.result.json
+managed/networking/dns.json -> managed/networking/dns.json.result.json
 ```
 
 Keeping the original extension avoids collisions between different input formats.
 Reject unrepresentable destination names clearly before executing the input;
-never truncate or normalize names into collisions. Result names cannot contain
-directory components and must be valid UTF-8 for the JSON identity. V1 limits
+never truncate or normalize names into collisions. Logical source names must be
+valid UTF-8, slash-separated relative paths without empty, dot or parent
+components, native backslashes or absolute/volume prefixes. Validate every
+destination component and reject redirected result parents. Create missing result
+parents with the same private permissions as the root. V1 limits
 result basenames to 255 bytes on Linux or 255 UTF-16 code units on Windows,
 and rejects paths exceeding Linux's 4095-byte or Windows' extended-path limit.
 Only one daemon instance may own a given directory pair;
@@ -474,9 +541,9 @@ The initial envelope uses the following fields:
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `schemaVersion` | integer | `1` for this envelope contract. |
-| `configuration` | string | Exact source basename, including its extension. |
+| `configuration` | string | Source path relative to `ConfigDir`, normalized with `/`, including its extension. Root-level identifiers are unchanged. |
 | `operation` | string or null | Effective `set` or `test`, including implicit `set`; matches the submitted operation whenever DSC is invoked. Null if metadata or an earlier input failure prevents resolving the operation; DSC is not invoked. |
-| `parameters` | optional string | Selected parameter-sidecar basename; omitted when no unique sidecar was selected. Never contains parameter values. |
+| `parameters` | optional string | Selected parameter-sidecar path relative to `ConfigDir`, normalized with `/`; omitted when no unique sidecar was selected. Never contains parameter values. |
 | `inputHash` | optional string | Combined SHA-256 of captured configuration/parameter strings and effective operation; omitted when capture or metadata validation fails. Start failures can retain a hash of input not submitted. |
 | `startedAt` | string | UTC RFC 3339 timestamp with fractional seconds as needed. |
 | `finishedAt` | string | UTC timestamp in the same format. |
@@ -544,7 +611,9 @@ per-attempt stderr. Operation-aware input hashes use the separately versioned
 v2 framing while preserving the capture-to-submission guarantee.
 
 Readers must tolerate unknown fields and reject unsupported major envelope
-versions. Additive fields may retain version 1; readers must still accept older
+versions. The recursive path extension retains version 1 and existing field roles:
+root-level names are unchanged, and nested names uniquely identify new inputs.
+Additive fields may retain version 1; readers must still accept older
 v1 records without those fields. Changes to existing field meaning, required
 fields, or outcome semantics require a versioned contract change. DSC's nested
 schema has its own version and compatibility requirements.
@@ -557,8 +626,11 @@ ordering; `durationMs` is the elapsed-time measurement.
 
 ## Publication and persistence failures
 
-The writer serializes the complete envelope to a unique temporary file in the
-results directory, syncs and closes it, then replaces the target. Check each
+The writer serializes the complete envelope before creating any temporary file.
+It prepares private result parents, creates a unique `.dscd-*` temporary file in
+the **destination's own directory**, writes the complete JSON, syncs and closes
+it, then replaces the target. Temporary and target files therefore stay on the
+same filesystem, including nested mount points. Check each
 operation and clean up an unpublished temporary file after failure. Never remove
 or truncate the old result before the replacement is ready. Readers should see
 either the complete previous envelope or the complete replacement.
@@ -870,8 +942,9 @@ Implement the typed config, DSC process boundary, and result writer first. Add a
 testable single pass and then the periodic lifecycle. Wire them in `cmd/dscd`,
 then add packaging and operator documentation. Keep dependencies small:
 `golang.org/x/sys` supplies native Windows SCM, Event Log, process jobs, ACLs and
-replacement APIs; `go.yaml.in/yaml/v3` handles embedded metadata; fsnotify supplies
-cross-platform directory notifications. OS file suffixes isolate native details;
+replacement APIs and recursive directory notifications; `go.yaml.in/yaml/v3`
+handles embedded metadata; fsnotify supplies Linux directory notifications.
+Build tags and OS file suffixes isolate native details;
 core reconciliation does not branch on operating system.
 
 Tests use temporary directories, small fakes defined against the consumer's
@@ -887,9 +960,12 @@ coalescing, non-overlap, full-pass scheduling, and watcher recovery assertions.
 Block execution/publication/cleanup to verify collectors continue consuming
 events and reporting failures without scheduler-dependent backpressure. Suppress
 root events to test periodic directory-identity recovery. Native tests exercise
-creation, modification, and atomic publication of configurations and sidecars on
+creation, modification, deletion, directory moves, and atomic publication of configurations and sidecars on
 both Linux and Windows using fake DSC and temporary files. Synchronize with
 channels/readiness, not arbitrary sleeps; do not assume exactly-once OS events.
+Windows tests additionally exercise native buffer overflow, cancellation during
+idle reads and blocked delivery, handle release, malformed notifications, and
+snapshot reads while a producer's rename handle remains open.
 
 Use the build, test, vet, formatting, and race checks specified in
 [AGENTS.md](../AGENTS.md). `ci.yaml` runs these checks natively on Linux and Windows

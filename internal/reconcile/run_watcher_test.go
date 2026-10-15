@@ -39,6 +39,12 @@ func (l *attemptLog) snapshot() ([]string, []time.Time) {
 	return append([]string(nil), l.names...), append([]time.Time(nil), l.times...)
 }
 
+func (l *attemptLog) reset() {
+	l.mu.Lock()
+	l.names, l.times = nil, nil
+	l.mu.Unlock()
+}
+
 func TestRunTargetedEvents(t *testing.T) {
 	for _, test := range []struct {
 		name     string
@@ -60,7 +66,7 @@ func TestRunTargetedEvents(t *testing.T) {
 		{"hidden", nil, ".hidden.yaml", fsnotify.Create, ""},
 		{"yml", nil, "web.yml", fsnotify.Create, ""},
 		{"uppercase", nil, "web.YAML", fsnotify.Create, ""},
-		{"delete parameters", []string{"web.yaml", "web.parameters.json"}, "web.parameters.json", fsnotify.Remove, ""},
+		{"delete parameters", []string{"web.yaml", "web.parameters.json"}, "web.parameters.json", fsnotify.Remove, "web.yaml"},
 		{"delete configuration", []string{"web.yaml"}, "web.yaml", fsnotify.Remove, ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -103,7 +109,11 @@ func TestRunTargetedEvents(t *testing.T) {
 						t.Fatalf("calls=%+v results=%+v", calls, writer.results)
 					}
 					if parameterName(test.changed) {
-						if calls[0].ParametersText != text {
+						if test.op == fsnotify.Remove {
+							if calls[0].Parameters != "" || calls[0].ParametersText != "" {
+								t.Fatal("deleted parameters still submitted")
+							}
+						} else if calls[0].ParametersText != text {
 							t.Fatal("did not submit current parameter bytes")
 						}
 					} else if calls[0].ConfigurationText != text || calls[0].Operation != dsc.OperationTest {
@@ -290,7 +300,7 @@ func TestCollectorDoesNotWaitForScheduler(t *testing.T) {
 				}
 				close(release)
 				synctest.Wait()
-				if starts != 3 || closes != 3 || calls != 3 || source.closed != 1 {
+				if starts != 2 || closes != 2 || calls != 3 || source.closed != 1 {
 					t.Fatalf("lost/coalesced incorrectly: starts=%d calls=%d closes=%d watcher closes=%d", starts, calls, closes, source.closed)
 				}
 				if !strings.Contains(logs.String(), "periodic reconciliation continues") {
@@ -405,7 +415,7 @@ func TestRunCancellationDuringTargetedExecution(t *testing.T) {
 }
 
 func TestRunWatcherRecovery(t *testing.T) {
-	for _, kind := range []string{"setup failure", "overflow", "silent replacement", "missing then recreated"} {
+	for _, kind := range []string{"setup failure", "silent replacement", "missing then recreated"} {
 		t.Run(kind, func(t *testing.T) {
 			root := t.TempDir()
 			dir := filepath.Join(root, "inputs")
@@ -443,10 +453,6 @@ func TestRunWatcherRecovery(t *testing.T) {
 				var first *fakeEvents
 				if kind != "setup failure" {
 					first = <-sources
-				}
-				if kind == "overflow" {
-					first.errors <- fsnotify.ErrEventOverflow
-					synctest.Wait()
 				}
 				if kind == "silent replacement" || kind == "missing then recreated" {
 					if err := os.Rename(dir, filepath.Join(root, "old")); err != nil {

@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path"
 	"path/filepath"
-	"sort"
 	"time"
 
 	"github.com/Bpoe/dsc-reconciler/internal/dsc"
@@ -69,6 +69,11 @@ func (r *Reconciler) Run(ctx context.Context) {
 				watchFailure(err)
 			}
 		}
+		if watcher != nil {
+			if err := watcher.addTree(ctx, r.dir); err != nil {
+				watchFailure(err)
+			}
+		}
 		if watcher == nil {
 			var err error
 			watcher, err = startDirectoryWatch(ctx, r.dir, r.watch, pending)
@@ -84,8 +89,9 @@ func (r *Reconciler) Run(ctx context.Context) {
 	nextFull := time.Now().Add(r.interval)
 	timer := time.NewTimer(r.interval)
 	defer timer.Stop()
-	var batch map[string]map[string]struct{}
-	var bases []string
+	var batch []candidate
+	var batchChanges map[string]inputChanges
+	recoveryRequested, recoveryAttempted := false, false
 	for {
 		if ctx.Err() != nil {
 			return
@@ -93,38 +99,72 @@ func (r *Reconciler) Run(ctx context.Context) {
 		if watcher != nil {
 			if err := watcher.failure(); err != nil {
 				watchFailure(err)
+				recoveryRequested = !recoveryAttempted
 			}
 		}
-		if !time.Now().Before(nextFull) {
+		periodicDue := !time.Now().Before(nextFull)
+		if periodicDue || recoveryRequested {
+			if recoveryRequested {
+				// This full discovery covers pre-failure hints. Changes arriving
+				// during recovery remain pending, just as during normal work.
+				pending.take()
+				pending.takeEntries()
+				batch, batchChanges = nil, nil
+			}
+			recoveryAttempted = !periodicDue
+			recoveryRequested = false
 			fullPass()
 			nextFull = time.Now().Add(r.interval)
 			timer.Reset(r.interval)
 			continue
 		}
-		if len(bases) == 0 {
-			batch = pending.take()
-			for base := range batch {
-				bases = append(bases, base)
+		if watcher != nil {
+			if err := watcher.update(ctx, r.dir, pending); err != nil {
+				watchFailure(err)
+				recoveryRequested = !recoveryAttempted
+				if recoveryRequested {
+					continue
+				}
 			}
-			sort.Strings(bases)
 		}
-		if len(bases) != 0 {
-			base := bases[0]
-			bases = bases[1:]
-			// Merge notifications received while this key waited in the batch.
-			// Anything received after dispatch remains pending for a follow-up.
-			for name := range pending.takeBase(base) {
-				batch[base][name] = struct{}{}
+		if len(batch) == 0 {
+			batchChanges = pending.take()
+			names := make(inputChanges)
+			for _, changes := range batchChanges {
+				for name, removed := range changes {
+					names[name] = removed
+				}
 			}
-			if err := r.changed(ctx, batch[base]); err != nil && !errors.Is(err, context.Canceled) {
+			var err error
+			batch, err = changedCandidates(r.dir, names)
+			if err != nil {
+				r.log.Error("targeted discovery failed", "config_path", r.dir, "error", err)
+			}
+		}
+		if len(batch) != 0 {
+			name := batch[0].name
+			batch = batch[1:]
+			// Rediscover at dispatch, coalescing updates to this configuration
+			// while retaining notifications received during its attempt.
+			changes := batchChanges[configurationBase(name)]
+			for changed, removed := range pending.takeName(name) {
+				changes[changed] = changes[changed] || removed
+			}
+			candidates, err := changedCandidates(r.dir, changes)
+			for _, item := range candidates {
+				if item.name == name {
+					err = errors.Join(err, r.execute(ctx, []candidate{item}))
+					break
+				}
+			}
+			if err != nil && !errors.Is(err, context.Canceled) {
 				r.log.Error("targeted reconciliation failed", "config_path", r.dir, "error", err)
 			}
-			delete(batch, base)
 			continue
 		}
 		var watchDone <-chan struct{}
 		if watcher != nil {
-			watchDone = watcher.done
+			watchDone = watcher.failed
 		}
 		select {
 		case <-ctx.Done():
@@ -141,22 +181,16 @@ func (r *Reconciler) Pass(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	candidates, err := discover(r.dir)
-	if err != nil {
-		return err
-	}
-	return r.execute(ctx, candidates)
+	candidates, err := discoverTree(ctx, r.dir)
+	return errors.Join(err, r.execute(ctx, candidates))
 }
 
-func (r *Reconciler) changed(ctx context.Context, names map[string]struct{}) error {
+func (r *Reconciler) changed(ctx context.Context, names inputChanges) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	candidates, err := changedCandidates(r.dir, names)
-	if err != nil {
-		return err
-	}
-	return r.execute(ctx, candidates)
+	return errors.Join(err, r.execute(ctx, candidates))
 }
 
 // execution owns a session for a full pass or one targeted dispatch.
@@ -191,11 +225,10 @@ func (p *execution) attempt(ctx context.Context, candidate candidate) error {
 		return err
 	}
 	r := p.r
-	path := candidate.input.Configuration
-	name := filepath.Base(path)
-	target, err := r.writer.Destination(name)
+	configPath := candidate.input.Configuration
+	target, err := r.writer.Destination(candidate.name)
 	if err != nil {
-		r.log.Error("unrepresentable result name; document not executed", "config_path", path, "error", err)
+		r.log.Error("unrepresentable result name; document not executed", "config_path", configPath, "error", err)
 		return nil
 	}
 	var result dsc.Result
@@ -203,9 +236,12 @@ func (p *execution) attempt(ctx context.Context, candidate candidate) error {
 	err = candidate.err
 	input := candidate.input
 	if err == nil {
+		err = checkInputDirectory(r.dir, path.Dir(candidate.name))
+	}
+	if err == nil {
 		input, err = readInput(ctx, input)
 		if err == nil {
-			input.Operation, err = configurationOperation(path, input.ConfigurationText)
+			input.Operation, err = configurationOperation(configPath, input.ConfigurationText)
 		}
 		if err == nil {
 			hash = inputHash(input)
@@ -237,6 +273,11 @@ func (p *execution) attempt(ctx context.Context, candidate candidate) error {
 			}
 		}
 	}
+	result.Configuration = candidate.name
+	result.Parameters = ""
+	if input.Parameters != "" {
+		result.Parameters = path.Join(path.Dir(candidate.name), filepath.Base(input.Parameters))
+	}
 	result.InputHash = hash
 	level := slog.LevelInfo
 	if result.Error != nil {
@@ -247,14 +288,14 @@ func (p *execution) attempt(ctx context.Context, candidate candidate) error {
 	if result.Error != nil {
 		kind = result.Error.Kind
 	}
-	r.log.Log(ctx, level, "DSC attempt completed", "config_path", path, "outcome", result.Outcome,
+	r.log.Log(ctx, level, "DSC attempt completed", "config_path", configPath, "configuration", candidate.name, "outcome", result.Outcome,
 		"duration", time.Duration(result.DurationMS)*time.Millisecond, "exit_code", result.ExitCode,
 		"parameters_path", input.Parameters, "operation", result.Operation, "error_kind", kind)
 	publication, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	err = r.writer.Write(publication, result)
 	cancel()
 	if err != nil {
-		r.log.Error("result publication failed", "config_path", path, "result_path", target, "error", err)
+		r.log.Error("result publication failed", "config_path", configPath, "result_path", target, "error", err)
 	}
 	return nil
 }

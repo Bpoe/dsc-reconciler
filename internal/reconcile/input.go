@@ -57,7 +57,7 @@ func readInputFile(ctx context.Context, path string, limit int) (text string, er
 	if !info.Mode().IsRegular() {
 		return "", errors.New("not a regular file")
 	}
-	f, err := os.Open(path)
+	f, err := openInputFile(path)
 	if err != nil {
 		return "", err
 	}
