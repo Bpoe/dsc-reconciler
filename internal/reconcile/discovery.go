@@ -15,9 +15,10 @@ import (
 )
 
 type candidate struct {
-	name  string // Slash-separated path relative to the configuration root.
-	input dsc.Input
-	err   error
+	name    string // Slash-separated path relative to the configuration root.
+	input   dsc.Input
+	err     error
+	changes inputChanges // Targeted hints must remain eligible after protection.
 }
 
 // inputChanges maps relative input names to whether an explicit removal was
@@ -131,6 +132,12 @@ func changedCandidates(dir string, names inputChanges) ([]candidate, error) {
 	selected := candidates[:0]
 	for _, item := range candidates {
 		if affected[configurationBase(item.name)] {
+			item.changes = make(inputChanges)
+			for name, removed := range names {
+				if base, ok := changedBase(name); ok && base == configurationBase(item.name) {
+					item.changes[name] = removed
+				}
+			}
 			selected = append(selected, item)
 		}
 	}

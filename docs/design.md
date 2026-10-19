@@ -737,7 +737,8 @@ The next scheduled attempt is the normal retry opportunity.
 | Invalid options, unreadable input directory, unusable results directory, or missing executable at startup | Log clearly and exit nonzero. |
 | Input-directory scan fails after startup | Log the failed pass and retry on the next interval. |
 | Watcher setup/runtime failure, lost watch, or changed/unavailable directory identity | Log, preserve periodic full passes, and retry watch registration at full-pass boundaries. |
-| A document cannot be read or DSC fails | Publish a failed attempt and continue to later documents. |
+| Configuration disappears, becomes stale while waiting, or conflicts with a Windows publisher handle | Skip without a result; rediscover on later notifications or passes. |
+| Other input-read errors or DSC failures | Publish a failed attempt and continue to later documents. |
 | DSC returns unusable RPC output or reports errors | Publish a failed attempt; restart only an unusable session. |
 | Server startup/initialization fails | Publish remaining input failures as described above, log a pass-level error, retry next pass. |
 | Result publication fails | Log source, destination, and error; continue; retry through later reconciliation. |

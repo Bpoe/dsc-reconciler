@@ -58,6 +58,7 @@ func TestProtectionRevalidatesDiscoveredPairing(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+
 			const parameterText = `{"current":"parameters"}`
 			for _, format := range tc.currentParameters {
 				writeInput(t, dir, "20-web.parameters."+format, parameterText)
@@ -133,6 +134,75 @@ func TestProtectionRevalidatesDiscoveredPairing(t *testing.T) {
 				if result.Error != nil || result.Outcome != "succeeded" {
 					t.Errorf("independent configuration failed: %+v", result)
 				}
+			}
+		})
+	}
+}
+
+func TestProtectionRevalidatesTargetedHintEligibility(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		changes inputChanges
+		wantRun bool
+	}{
+		{name: "stale sidecar create or write", changes: inputChanges{"web.parameters.json": false}},
+		{name: "explicit sidecar removal", changes: inputChanges{"web.parameters.json": true}, wantRun: true},
+		{name: "configuration change", changes: inputChanges{"web.yaml": false}, wantRun: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			const text = "metadata: {dscd: {operation: test}}\nresources: []\n"
+			config := writeInput(t, dir, "web.yaml", text)
+			parameters := writeInput(t, dir, "web.parameters.json", `{"old":"parameters"}`)
+			candidates, err := changedCandidates(dir, tc.changes)
+			if err != nil || len(candidates) != 1 {
+				t.Fatalf("targeted discovery = %v, %v", candidates, err)
+			}
+			if candidates[0].input.Parameters != parameters {
+				t.Fatalf("initial candidate parameters = %q, want %q", candidates[0].input.Parameters, parameters)
+			}
+			if err := os.Remove(parameters); err != nil {
+				t.Fatal(err)
+			}
+			wantInput := dsc.Input{
+				Configuration:     config,
+				ConfigurationText: text,
+				Operation:         dsc.OperationTest,
+			}
+			starts, calls := 0, 0
+			client := fakeDSC{run: func(_ context.Context, in dsc.Input) dsc.Result {
+				calls++
+				if in != wantInput {
+					t.Errorf("submitted input = %+v, want current parameterless input %+v", in, wantInput)
+				}
+				return dsc.Result{Outcome: "succeeded", Operation: &in.Operation}
+			}}
+			start := func(ctx context.Context) (DSC, error) {
+				starts++
+				return client.start(ctx)
+			}
+			writer := &fakeWriter{}
+			if err := New(dir, time.Second, start, writer, logger()).execute(context.Background(), candidates); err != nil {
+				t.Fatal(err)
+			}
+			wantCalls := 0
+			if tc.wantRun {
+				wantCalls = 1
+			}
+			results := writer.snapshot()
+			if starts != wantCalls || calls != wantCalls || len(results) != wantCalls {
+				t.Fatalf("started %d sessions, executed %d times, published %d results; want %d each",
+					starts, calls, len(results), wantCalls)
+			}
+			if tc.wantRun {
+				result := results[0]
+				if result.Error != nil || result.Configuration != "web.yaml" || result.Parameters != "" ||
+					result.InputHash != inputHash(wantInput) || result.Operation == nil || *result.Operation != wantInput.Operation {
+					t.Fatalf("result does not describe current parameterless input: %+v", result)
+				}
+			}
+			if err := os.Remove(config); err != nil {
+				t.Fatalf("configuration protection leaked after targeted eligibility check: %v", err)
 			}
 		})
 	}
