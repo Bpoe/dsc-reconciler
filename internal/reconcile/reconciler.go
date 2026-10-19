@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path"
 	"path/filepath"
 	"time"
@@ -220,26 +221,75 @@ func (r *Reconciler) execute(ctx context.Context, candidates []candidate) (passE
 	return nil
 }
 
-func (p *execution) attempt(ctx context.Context, candidate candidate) error {
+func (p *execution) attempt(ctx context.Context, item candidate) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	r := p.r
-	configPath := candidate.input.Configuration
-	target, err := r.writer.Destination(candidate.name)
+	configPath := item.input.Configuration
+	target, err := r.writer.Destination(item.name)
 	if err != nil {
 		r.log.Error("unrepresentable result name; document not executed", "config_path", configPath, "error", err)
 		return nil
 	}
 	var result dsc.Result
 	hash := ""
-	err = candidate.err
-	input := candidate.input
+	input := item.input
+	err = checkInputDirectory(r.dir, path.Dir(item.name))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	var protected *os.File
 	if err == nil {
-		err = checkInputDirectory(r.dir, path.Dir(candidate.name))
+		protected, err = openConfiguration(ctx, configPath)
+		if errors.Is(err, errStaleInput) {
+			r.log.Debug("configuration changed before reconciliation; attempt skipped", "config_path", configPath)
+			return nil
+		}
+		if ctx.Err() != nil && protected == nil {
+			return ctx.Err()
+		}
+		if protected != nil {
+			defer func() {
+				if err := protected.Close(); err != nil {
+					r.log.Error("close protected configuration failed", "config_path", configPath, "error", err)
+				}
+			}()
+		}
 	}
 	if err == nil {
-		input, err = readInput(ctx, input)
+		// Discovery is only a hint. Re-pair under protection so a publisher's
+		// replacement cannot inherit the previous configuration's sidecar.
+		err = checkInputDirectory(r.dir, path.Dir(item.name))
+		if err == nil {
+			var items []candidate
+			if item.changes != nil {
+				items, err = changedCandidates(r.dir, item.changes)
+			} else {
+				items, err = discoverDirectory(r.dir, filepath.Dir(configPath))
+			}
+			if err == nil {
+				found := false
+				for _, current := range items {
+					if current.name == item.name {
+						input, err, found = current.input, current.err, true
+						break
+					}
+				}
+				if !found {
+					return nil
+				}
+			}
+		}
+	}
+	if err == nil {
+		input.ConfigurationText, err = readInputContents(ctx, protected, maxInputBytes)
+		if err != nil {
+			err = fmt.Errorf("read reconciliation input %q: %w", configPath, err)
+		}
+		if err == nil && input.Parameters != "" {
+			input.ParametersText, err = readInputFile(ctx, input.Parameters, maxInputBytes-len(input.ConfigurationText))
+		}
 		if err == nil {
 			input.Operation, err = configurationOperation(configPath, input.ConfigurationText)
 		}
@@ -273,10 +323,10 @@ func (p *execution) attempt(ctx context.Context, candidate candidate) error {
 			}
 		}
 	}
-	result.Configuration = candidate.name
+	result.Configuration = item.name
 	result.Parameters = ""
 	if input.Parameters != "" {
-		result.Parameters = path.Join(path.Dir(candidate.name), filepath.Base(input.Parameters))
+		result.Parameters = path.Join(path.Dir(item.name), filepath.Base(input.Parameters))
 	}
 	result.InputHash = hash
 	level := slog.LevelInfo
@@ -288,7 +338,7 @@ func (p *execution) attempt(ctx context.Context, candidate candidate) error {
 	if result.Error != nil {
 		kind = result.Error.Kind
 	}
-	r.log.Log(ctx, level, "DSC attempt completed", "config_path", configPath, "configuration", candidate.name, "outcome", result.Outcome,
+	r.log.Log(ctx, level, "DSC attempt completed", "config_path", configPath, "configuration", item.name, "outcome", result.Outcome,
 		"duration", time.Duration(result.DurationMS)*time.Millisecond, "exit_code", result.ExitCode,
 		"parameters_path", input.Parameters, "operation", result.Operation, "error_kind", kind)
 	publication, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)

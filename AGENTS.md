@@ -106,6 +106,17 @@ slash-normalized relative paths for identities and mirror those paths under
 the results root. Sort all candidates globally by full filename, then relative
 path for ties; directory names and numeric parsing never set primary priority.
 Ordering does not create dependencies between configurations.
+Protect each configuration before input reads through the result publication
+attempt, releasing on every exit. Linux uses cancellation-aware exclusive
+`flock` on the configuration itself and verifies pathname/file identity after
+acquisition; Windows uses a read handle with only `FILE_SHARE_READ`. Skip stale,
+missing or temporarily sharing-conflicted configurations without a result.
+Rediscover same-directory ambiguity and parameter membership under protection,
+and read the configuration from the protected handle. Keep delete sharing for
+ordinary sidecar/directory reads and watcher handles. Cooperating publishers
+remove the configuration before changing parameters/results and atomically
+install parameters first, configuration last; Linux publishers must acquire and
+hold the same exclusive advisory lock, not merely probe it. Do not add lock files.
 Use `go.yaml.in/yaml/v3` nodes for YAML and `encoding/json` raw messages for JSON
 to extract metadata without modeling DSC resources. Never strip or reserialize inputs.
 

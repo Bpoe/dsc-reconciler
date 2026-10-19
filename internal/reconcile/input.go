@@ -69,6 +69,10 @@ func readInputFile(ctx context.Context, path string, limit int) (text string, er
 	if !info.Mode().IsRegular() {
 		return "", errors.New("opened input is not a regular file")
 	}
+	return readInputContents(ctx, f, limit)
+}
+
+func readInputContents(ctx context.Context, f *os.File, limit int) (string, error) {
 	var content bytes.Buffer
 	buffer := make([]byte, 32*1024)
 	for {

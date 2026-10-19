@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -119,14 +121,22 @@ func TestExactSnapshotSubmittedAfterReplacement(t *testing.T) {
 	expected := dsc.Input{Configuration: config, Parameters: params, Operation: dsc.OperationTest, ConfigurationText: original, ParametersText: "old parameters\n"}
 	writer := &fakeWriter{}
 	start := func(context.Context) (DSC, error) {
-		// Startup occurs after the snapshot. Neither pathname may be reopened for this attempt.
-		if err := os.Remove(config); err != nil {
-			t.Fatal(err)
+		// Startup occurs after capture. Noncooperating changes must not alter the submitted snapshot.
+		if runtime.GOOS == "windows" {
+			const errorSharingViolation = syscall.Errno(32) // ERROR_SHARING_VIOLATION
+			if err := os.Remove(config); !errors.Is(err, errorSharingViolation) {
+				t.Fatalf("protected configuration removal = %v, want sharing violation", err)
+			}
+		} else {
+			// Linux protection is advisory; deliberately ignore the publisher contract.
+			if err := os.Remove(config); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(config, []byte("metadata:\n  dscd:\n    operation: set\nresources: []\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
 		}
 		if err := os.Remove(params); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(config, []byte("metadata:\n  dscd:\n    operation: set\nresources: []\n"), 0600); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(params, []byte("new parameters"), 0600); err != nil {
@@ -144,6 +154,9 @@ func TestExactSnapshotSubmittedAfterReplacement(t *testing.T) {
 	}
 	if len(writer.results) != 1 || writer.results[0].InputHash != inputHash(expected) {
 		t.Fatal("hash does not match submitted bytes")
+	}
+	if err := os.Remove(config); err != nil {
+		t.Fatalf("configuration still protected after pass: %v", err)
 	}
 }
 
