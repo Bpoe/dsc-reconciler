@@ -86,6 +86,33 @@ place. Orphan parameters do not execute anything; the configuration's arrival
 uses the parameters already present. There is no write-correlation delay.
 See [filesystem-triggered reconciliation](#filesystem-triggered-reconciliation).
 
+### Updating configurations safely
+
+`dscd` protects each configuration file from before reading it and its parameters
+until its result publication attempt finishes, including execution/publication
+failures. Protection is then released.
+
+- **Linux:** an exclusive advisory `flock` on the configuration itself.
+  Publishers **must acquire and hold a compatible exclusive lock**, verify the
+  locked file is still current after waiting, and retry if it changed. Merely
+  checking for a lock is not sufficient; noncooperating writers are not blocked.
+  Lock waits in `dscd` respect service cancellation.
+- **Windows:** a read handle permits compatible readers but denies write and
+  delete sharing, preventing deletion/replacement until publication finishes.
+  Publishers must retry sharing conflicts.
+
+Stage replacements first. Remove the existing configuration while respecting
+protection, then remove its old parameters and result, atomically install new
+parameters, and atomically install the configuration **last**. On Linux retain
+the old file's lock through the update. Serialize updates to the same configuration.
+Do not change parameters independently while relying on this guarantee.
+There are no separate lock files or parameter locks.
+
+Disappeared/stale configurations and temporary Windows sharing conflicts are
+skipped without publishing misleading failures; later notifications or periodic
+passes discover replacements. See the
+[publisher contract](docs/design.md#per-configuration-protection-and-publishers).
+
 ### Read results
 Each configuration has a latest-result file. For `web.yaml`, read:
 
@@ -389,7 +416,8 @@ Use `-help` for flags. There are no subcommands, daemon configuration files or
 daemon environment overrides. The OS `ProgramData` variable selects Windows'
 standard data root, with `C:\ProgramData` as fallback. Input and output directories
 must be separate and non-nested; aliases through existing symlinks are resolved.
-Only one daemon instance may own a directory pair; no multi-process lock is provided.
+Only one daemon instance may own a directory pair; no directory-wide
+daemon-instance lock is provided.
 
 Discovery is recursive, with no daemon-imposed depth limit. Ordinary files ending
 in case-sensitive `.yaml` or `.json` are eligible; `.dsc.` is not required in
@@ -584,9 +612,10 @@ and sends the same text and operation to DSC. Embedded metadata is part of that
 snapshot: formatting changes and ignored properties change the hash even though
 they do not change the effective operation.
 DSC never reopens the input paths: **bytes hashed equal bytes submitted**.
-Replacing any input after capture does not affect that attempt. Capturing
-configuration and parameters is not an atomic producer transaction;
-producers still coordinate updates.
+Changes after capture do not affect the submitted strings.
+[Configuration protection](#updating-configurations-safely) keeps the pair
+consistent when publishers follow the remove-configuration-first contract; it
+is not a filesystem transaction or protection against noncooperating Linux writers.
 Inline inputs do not provide the CLI's implicit file-root/`DSC_CONFIG_ROOT`
 context; documents must not rely on it.
 Keep executable/resource directories and input/output parents non-writable by

@@ -165,13 +165,12 @@ func TestParameterDisappearsBeforeExecution(t *testing.T) {
 	if err := New(dir, time.Second, client.start, writer, logger()).Pass(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(calls, []string{"10-first.yaml", "30-last.json"}) || len(writer.results) != 3 {
+	if !reflect.DeepEqual(calls, []string{"10-first.yaml", "20-web.yaml", "30-last.json"}) || len(writer.results) != 3 {
 		t.Fatalf("calls=%v results=%+v", calls, writer.results)
 	}
 	result := writer.results[1]
-	if result.Error == nil || result.Error.Kind != "input" || result.Parameters != "20-web.parameters.json" ||
-		!strings.Contains(result.Error.Message, "20-web.parameters.json") {
-		t.Fatalf("lost missing-parameter failure: %+v", result)
+	if result.Error != nil || result.Parameters != "" || result.Outcome != "succeeded" {
+		t.Fatalf("did not reselect current parameters under protection: %+v", result)
 	}
 }
 

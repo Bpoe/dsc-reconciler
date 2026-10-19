@@ -164,15 +164,72 @@ configurations continue. Identical basenames in different directories do not
 conflict and cannot share sidecars. A selected sidecar that is a directory, symlink or
 unreadable file is an input failure, not permission to silently use defaults.
 
-Each pass uses that ordered list and runs one document at a time. Recheck that a
-configuration and selected parameter files are still readable regular
-files before reading them once into memory; if any disappeared or became unreadable,
-record an input failure and continue. This is operational
-validation, not a security boundary against a malicious local writer. Trusted
-producers must publish using temporary files and replacement, not in-place edits.
+Each pass uses that ordered list and runs one document at a time. Acquire
+protection on the configuration file before reading any inputs, then rediscover
+its directory to revalidate basename ambiguity and current parameter membership.
+Read the protected configuration handle and the selected regular parameter file
+once into memory. An unreadable input is an input failure; a configuration that
+disappeared, became stale while waiting for protection, or temporarily conflicts
+with a Windows publisher handle is skipped without execution or result publication.
+Subsequent notifications or periodic discovery can find the replacement.
+This is operational validation, not a security boundary against a malicious local writer.
 Unreadable subdirectories produce a pass-level scan error; other discovered
 configurations are still attempted. Input and parameter capture remain bounded
 and unchanged.
+
+### Per-configuration protection and publishers
+
+Every configuration, in every visible input directory, is protected from before
+input capture through metadata parsing, hashing, DSC execution and the entire
+result publication attempt. Release protection only after publication returns,
+including execution failures, input failures after acquisition, and publication
+failures. Cancellation during execution still permits the existing bounded result
+publication attempt before release. Cancellation while waiting for protection
+closes the waiting descriptor and does not publish a result for unacquired input.
+All work remains serial; protection does not change ordering or session lifetime.
+
+On Linux, open the configuration itself and acquire an exclusive advisory
+`flock(LOCK_EX)`. Acquisition uses nonblocking attempts with cancellation-aware
+waits. After acquisition, compare the open file's identity with the regular file
+currently at that pathname; a deleted/replaced inode is stale and is skipped.
+Keep that descriptor locked until the attempt finishes, then close it to release
+the lock. There are no separate lock files.
+
+**Linux locks require cooperation.** A publisher must open the existing
+configuration, acquire a compatible exclusive `flock`, and verify that the locked
+file is still current before deleting or replacing it. Merely probing whether
+the file is locked is insufficient: acquire and hold the lock while removing the
+configuration, and retain it through the update. Advisory locking does not stop
+noncooperating writes, unlinks, or renames.
+
+On Windows, open the configuration using `CreateFile` with read access and
+`FILE_SHARE_READ` only. Compatible readers remain allowed, but conflicting writers,
+deletion and replacement are denied while the handle is open; neither
+`FILE_SHARE_WRITE` nor `FILE_SHARE_DELETE` is enabled. No `LockFileEx` is needed.
+The protected handle is distinct from short-lived sidecar/directory identity
+reads and the recursive watcher, which retain delete sharing so directory moves
+and ordinary filesystem operations are not unnecessarily obstructed.
+
+Cooperating publishers (including external services such as `dscregsyncd`) stage
+complete replacement files first. Then:
+
+1. Remove the existing configuration, respecting its Linux exclusive lock or
+   retrying Windows sharing conflicts. Verify Linux identity again after waiting
+   and retry against the current file if it changed.
+2. Only after removal succeeds, remove old parameters and the old result.
+3. Atomically install the new parameters, if any.
+4. Atomically install the new configuration last.
+
+Removing the configuration first prevents new reconciliation during the
+parameter/result update; installing it last exposes the complete pair.
+No separate parameter locks, transaction markers, or coordination service are
+required. Do not modify parameters of a published configuration independently
+when relying on this consistency guarantee, or edit configurations in place.
+Publishers must serialize their own updates to the same configuration.
+Successful result publication completes before protection is released; if
+publication fails, its attempt still finishes before release, but no new result
+is guaranteed. The result envelope, input hash and atomic replacement contracts
+are unchanged.
 
 `dscd` remains the long-running daemon. Each nonempty pass normally uses one
 short-lived `dsc server`, started lazily before its first executable configuration.
@@ -195,7 +252,8 @@ validate startup
 register directory watch (failure is nonfatal)
 run one pass immediately:
     discover and sort configurations
-    capture each input, start server if needed, submit sequentially, publish results
+    protect each configuration, re-pair and capture inputs, start server if needed,
+        submit sequentially, publish result, release protection
     close the server
 until canceled, serially:
     if full pass is due:
@@ -262,10 +320,12 @@ Shutdown wakes the read loop, calls `CancelIoEx`, waits for completion, joins
 the reader and then closes the root and event handles. No persistent descendant
 handle or separate execution pipeline is introduced.
 
-Windows snapshot reads and short-lived directory identity handles use
+Windows sidecar reads and short-lived directory identity handles use
 `FILE_SHARE_DELETE` along with read/write sharing. A rename notification may
 arrive before the producer closes its rename handle; delete sharing permits
-immediate capture without adding a retry/debounce delay.
+these operations without adding a retry/debounce delay. Active configuration
+handles instead deny delete/write sharing; a conflicting publisher handle skips
+that attempt, leaving later notifications or periodic discovery to retry.
 
 Reuse discovery's exact case-sensitive naming, configuration eligibility, and
 sidecar association rules. Rediscover current inputs and select only the affected
@@ -506,10 +566,12 @@ The v2 hash framing deliberately changes hashes from the previous v1 framing
 even for `set`, independently of the unchanged result-envelope schema version.
 The hash identifies the exact desired-state input submitted for an attempt,
 not a skip/reconciliation cache key. For input/start failures it may describe a
-captured input that could not be submitted. Replacing a source file after capture
-cannot change that attempt. Reading configuration and parameters is not
-an atomic producer transaction; trusted producers must publish complete files
-and coordinate updates.
+captured input that could not be submitted. Changes after capture cannot change
+the submitted strings. Configuration protection and the
+[publisher contract](#per-configuration-protection-and-publishers) keep the
+captured configuration/parameter pair consistent for cooperating publishers;
+they are not a filesystem transaction or protection against noncooperating Linux
+writers.
 Inline submission also provides no source-path `DSC_CONFIG_ROOT` semantics.
 Documents must not rely on the old CLI's implicit file-root context.
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path"
 	"path/filepath"
 	"time"
@@ -233,13 +234,58 @@ func (p *execution) attempt(ctx context.Context, candidate candidate) error {
 	}
 	var result dsc.Result
 	hash := ""
-	err = candidate.err
 	input := candidate.input
+	err = checkInputDirectory(r.dir, path.Dir(candidate.name))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	var protected *os.File
 	if err == nil {
-		err = checkInputDirectory(r.dir, path.Dir(candidate.name))
+		protected, err = openConfiguration(ctx, configPath)
+		if errors.Is(err, errStaleInput) {
+			r.log.Debug("configuration changed before reconciliation; attempt skipped", "config_path", configPath)
+			return nil
+		}
+		if ctx.Err() != nil && protected == nil {
+			return ctx.Err()
+		}
+		if protected != nil {
+			defer func() {
+				if err := protected.Close(); err != nil {
+					r.log.Error("close protected configuration failed", "config_path", configPath, "error", err)
+				}
+			}()
+		}
 	}
 	if err == nil {
-		input, err = readInput(ctx, input)
+		// Discovery is only a hint. Re-pair under protection so a publisher's
+		// replacement cannot inherit the previous configuration's sidecar.
+		err = checkInputDirectory(r.dir, path.Dir(candidate.name))
+		if err == nil {
+			items, scanErr := discoverDirectory(r.dir, filepath.Dir(configPath))
+			err = scanErr
+			if err == nil {
+				found := false
+				for _, item := range items {
+					if item.name == candidate.name {
+						input, err, found = item.input, item.err, true
+						break
+					}
+				}
+				if !found {
+					return nil
+				}
+			}
+		}
+	}
+	if err == nil {
+		input.ConfigurationText, err = readInputContents(ctx, protected, maxInputBytes)
+		if err != nil {
+			err = fmt.Errorf("read reconciliation input %q: %w", configPath, err)
+		}
+		if err == nil && input.Parameters != "" {
+			input.ParametersText, err = readInputFile(ctx, input.Parameters, maxInputBytes-len(input.ConfigurationText))
+		}
 		if err == nil {
 			input.Operation, err = configurationOperation(configPath, input.ConfigurationText)
 		}

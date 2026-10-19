@@ -160,7 +160,7 @@ func TestInputChangedBeforeExecution(t *testing.T) {
 	if err := New(dir, time.Second, client.start, writer, logger()).Pass(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(writer.results) != 2 || writer.results[1].Error.Kind != "input" {
+	if len(writer.results) != 1 || writer.results[0].Configuration != "10-a.yaml" {
 		t.Fatalf("results = %+v", writer.results)
 	}
 }
