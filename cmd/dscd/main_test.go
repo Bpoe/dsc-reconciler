@@ -99,6 +99,7 @@ func TestRealProcessPerPassAndRecovery(t *testing.T) {
 				"a.yaml":            fmt.Sprintf(`{"mode":%q,"resources":[]}`, test.mode),
 				"b.yaml":            `{"mode":"test drift","metadata":{"dscd":{"operation":"test","future":[null,true,{"secret":"PRIVATE-METADATA"}]}},"resources":[]}`,
 				"c.json":            `{"mode":"success","metadata":{"dscd":{"operation":"set"}},"resources":[]}`,
+				"d.json":            `{"mode":"success","metadata":{"dscd":{"operation":"export"}},"resources":[]}`,
 				"b.parameters.json": "private-sidecar-value",
 			} {
 				if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0600); err != nil {
@@ -121,11 +122,25 @@ func TestRealProcessPerPassAndRecovery(t *testing.T) {
 			loop := reconcile.New(dir, time.Second, func(ctx context.Context) (reconcile.DSC, error) { return client.Start(ctx) }, writer, slog.New(slog.NewJSONHandler(&logs, nil)))
 			var previousPID int
 			for pass := 1; pass <= 2; pass++ {
+				if pass > 1 {
+					for _, name := range []string{"a.yaml", "b.yaml", "c.json", "d.json"} {
+						previous, err := writer.Read(context.Background(), name)
+						if err != nil {
+							t.Fatal(err)
+						}
+						previous.FinishedAt = time.Now().Add(-48 * time.Hour).UTC()
+						previous.StartedAt = previous.FinishedAt.Add(-time.Second)
+						previous.DurationMS = 1000
+						if err := writer.Write(context.Background(), previous); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
 				if err := loop.Pass(context.Background()); err != nil {
 					t.Fatal(err)
 				}
 				var pids []int
-				for _, name := range []string{"a.yaml", "b.yaml", "c.json"} {
+				for _, name := range []string{"a.yaml", "b.yaml", "c.json", "d.json"} {
 					path, _ := writer.Destination(name)
 					data, err := os.ReadFile(path)
 					if err != nil {
@@ -147,6 +162,17 @@ func TestRealProcessPerPassAndRecovery(t *testing.T) {
 						operation = dsc.OperationTest
 						if !strings.Contains(string(result.DSCResult), `"inDesiredState":false`) {
 							t.Fatal("lost test drift result")
+						}
+					}
+					if name == "d.json" {
+						operation = dsc.OperationExport
+						var payload struct {
+							Result struct {
+								Resources []json.RawMessage `json:"resources"`
+							} `json:"result"`
+						}
+						if json.Unmarshal(result.DSCResult, &payload) != nil || len(payload.Result.Resources) != 2 {
+							t.Fatal("lost exported configuration")
 						}
 					}
 					if result.Operation == nil || *result.Operation != operation {
@@ -180,6 +206,13 @@ func TestRealProcessPerPassAndRecovery(t *testing.T) {
 				}
 				if test.servers == 1 && strings.Count(string(data), "stop ") != pass {
 					t.Fatalf("server didn't stop after pass: %s", data)
+				}
+				if err := loop.Pass(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				afterSkip, err := os.ReadFile(lifetime)
+				if err != nil || !bytes.Equal(data, afterSkip) {
+					t.Fatalf("fresh results started another server: %s (%v)", afterSkip, err)
 				}
 				if strings.Contains(logs.String(), "private-sidecar-value") || strings.Contains(logs.String(), "PRIVATE-METADATA") {
 					t.Fatal("input or JSON-RPC diagnostic leaked to routine logs")
@@ -266,14 +299,20 @@ func resultServer() int {
 				return 6
 			}
 			resourceResults = append(resourceResults, map[string]any{"result": map[string]any{"inDesiredState": false}})
-		} else if req.Params.Arguments.Operation != dsc.OperationSet {
+		} else if req.Params.Arguments.Operation != dsc.OperationSet && req.Params.Arguments.Operation != dsc.OperationExport {
 			return 6
 		}
 		if req.Params.Arguments.Parameters != nil && *req.Params.Arguments.Parameters != "private-sidecar-value" {
 			return 5
 		}
+		payload := map[string]any{"metadata": map[string]any{"serverPID": os.Getpid()}, "messages": []any{}, "hadErrors": false}
+		if req.Params.Arguments.Operation == dsc.OperationExport {
+			payload["result"] = map[string]any{"resources": []any{map[string]string{"type": "One/Type"}, map[string]string{"type": "Other/Type"}}}
+		} else {
+			payload["results"] = resourceResults
+		}
 		encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{
-			"structuredContent": map[string]any{"result": map[string]any{"metadata": map[string]any{"serverPID": os.Getpid()}, "results": resourceResults, "messages": []any{}, "hadErrors": false}},
+			"structuredContent": map[string]any{"result": payload},
 		}})
 	}
 	return 0

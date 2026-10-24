@@ -135,8 +135,8 @@ func (c *Client) Start(ctx context.Context) (*Session, error) {
 // Execute submits captured input strings. A nonnil error means the session is
 // unusable and has been terminated; normal DSC failures are only in the Result.
 func (s *Session) Execute(ctx context.Context, input Input) (r Result, sessionErr error) {
-	if input.Operation != OperationSet && input.Operation != OperationTest {
-		return InputFailure(input, errors.New("operation must be set or test")), nil
+	if !input.Operation.Valid() {
+		return InputFailure(input, errors.New("operation must be set, test or export")), nil
 	}
 	start := time.Now()
 	r = newResult(input, start)
@@ -163,7 +163,7 @@ func (s *Session) Execute(ctx context.Context, input Input) (r Result, sessionEr
 	if err == nil {
 		var diagnostic string
 		var hadErrors bool
-		r.DSCResult, hadErrors, diagnostic, err = parseToolResult(raw)
+		r.DSCResult, hadErrors, diagnostic, err = parseToolResult(raw, input.Operation)
 		if err == nil {
 			switch {
 			case diagnostic != "":

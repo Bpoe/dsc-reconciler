@@ -21,9 +21,10 @@ type DSC interface {
 	Close() error
 }
 
-// ResultWriter validates destination names and publishes complete attempt results.
+// ResultWriter reads latest attempts, validates names and publishes complete results.
 type ResultWriter interface {
 	Destination(string) (string, error)
+	Read(context.Context, string) (dsc.Result, error)
 	Write(context.Context, dsc.Result) error
 }
 
@@ -177,7 +178,8 @@ func (r *Reconciler) Run(ctx context.Context) {
 	}
 }
 
-// Pass discovers and attempts each eligible document once. Per-document failures are handled locally.
+// Pass discovers all eligible documents and executes due ones.
+// Per-document failures are handled locally.
 func (r *Reconciler) Pass(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -233,6 +235,7 @@ func (p *execution) attempt(ctx context.Context, item candidate) error {
 		return nil
 	}
 	var result dsc.Result
+	var options metadata
 	hash := ""
 	input := item.input
 	err = checkInputDirectory(r.dir, path.Dir(item.name))
@@ -291,7 +294,8 @@ func (p *execution) attempt(ctx context.Context, item candidate) error {
 			input.ParametersText, err = readInputFile(ctx, input.Parameters, maxInputBytes-len(input.ConfigurationText))
 		}
 		if err == nil {
-			input.Operation, err = configurationOperation(configPath, input.ConfigurationText)
+			options, err = configurationMetadata(configPath, input.ConfigurationText)
+			input.Operation = options.operation
 		}
 		if err == nil {
 			hash = inputHash(input)
@@ -300,6 +304,13 @@ func (p *execution) attempt(ctx context.Context, item candidate) error {
 	if err != nil {
 		result = dsc.InputFailure(input, err)
 	} else {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if item.changes == nil && !r.due(ctx, item.name, input.Operation, hash, options.frequency) {
+			r.log.Debug("configuration is not due; attempt skipped", "config_path", configPath, "operation", input.Operation)
+			return nil
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -348,4 +359,24 @@ func (p *execution) attempt(ctx context.Context, item candidate) error {
 		r.log.Error("result publication failed", "config_path", configPath, "result_path", target, "error", err)
 	}
 	return nil
+}
+
+func (r *Reconciler) due(ctx context.Context, name string, operation dsc.Operation, hash string, frequency time.Duration) bool {
+	previous, err := r.writer.Read(ctx, name)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) && ctx.Err() == nil {
+			r.log.Warn("previous result unavailable; configuration is due", "configuration", name, "error", err)
+		}
+		return true
+	}
+	now := time.Now()
+	if previous.SchemaVersion != 1 || previous.Configuration != name ||
+		previous.Operation == nil || !previous.Operation.Valid() || previous.InputHash == "" ||
+		previous.FinishedAt.IsZero() || previous.FinishedAt.After(now) ||
+		previous.StartedAt.IsZero() || previous.StartedAt.After(previous.FinishedAt) || previous.DurationMS < 0 ||
+		(previous.Outcome != "succeeded" && previous.Outcome != "failed" && previous.Outcome != "canceled") {
+		r.log.Warn("previous result has unusable scheduling metadata; configuration is due", "configuration", name)
+		return true
+	}
+	return *previous.Operation != operation || previous.InputHash != hash || now.Sub(previous.FinishedAt) >= frequency
 }

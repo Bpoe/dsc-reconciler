@@ -3,8 +3,8 @@
 `dsc-reconciler` is a lightweight local reconciliation daemon for DSC. The `dscd`
 process continuously discovers DSC configuration documents in a configured directory,
 evaluates them against the local machine, applies any required changes by default,
-and records the results. Optional per-configuration metadata can select audit-only
-`test` execution instead.
+and records the results. Per-configuration metadata can select audit-only `test`
+or observed-state `export` execution and customize the frequency of any operation.
 
 The project is intentionally simple. `dscd` does not own configuration authoring,
 composition, or parameter processing; it inspects only document syntax and its
@@ -15,7 +15,7 @@ for higher-level configuration control planes.
 There is no network server, remote configuration store or DSC resource model.
 Filesystem notifications trigger targeted reconciliation; periodic full passes
 remain the correctness mechanism when notifications are missed or unavailable.
-`dscd` extracts only its own metadata; DSC owns testing and applying
+`dscd` extracts only its own metadata; DSC owns testing, applying and exporting
 configurations. See the
 [design and result contract](docs/design.md) and [contributor guidance](AGENTS.md).
 
@@ -73,6 +73,7 @@ $schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
 metadata:
   dscd:
     operation: test
+    frequency: 30m
 resources:
   - name: Example
     type: Microsoft.DSC.Debug/Echo
@@ -80,6 +81,7 @@ resources:
       output: Hello
 ```
 To enforce desired state instead, use `operation: set` or omit the metadata.
+Set/test default to a 15-minute frequency; export defaults to 24 hours.
 JSON supports the same [embedded metadata](#per-configuration-metadata).
 
 Changes trigger reconciliation of only the affected configuration as soon as the
@@ -224,7 +226,7 @@ packaging scripts; it does not create a tag or release.
 `packaging\windows\test-service.ps1` is a separate, **administrator-only,
 opt-in** SCM integration check; never run it on a production machine.
 
-To explicitly run the real DSC server tests, install `Microsoft.DSC.Debug/Echo`
+To explicitly run the real DSC set/export server tests, install `Microsoft.DSC.Debug/Echo`
 and set `DSCD_TEST_DSC_PATH` for that test process:
 
 ```powershell
@@ -423,7 +425,7 @@ exceeding the 30-second shutdown bound exits nonzero.
 | `-config-dir` | Linux `/etc/dsc/config.d`; Windows `%ProgramData%\dsc\config.d` | Existing readable input directory. |
 | `-results-dir` | Linux `/var/lib/dsc/results.d`; Windows `%ProgramData%\dsc\results.d` | Results directory, privately created if absent. |
 | `-dsc-path` | Windows: adjacent `dsc\dsc.exe`, then `dsc`; Linux: `dsc` | Explicit executable path or name overrides automatic selection; resolved once at startup. |
-| `-interval` | `5m` | Positive delay after each completed full reconciliation pass. Targeted work does not reset it. |
+| `-interval` | `5m` | Positive delay after each completed full discovery sweep. Only due configurations execute; targeted work does not reset the sweep timer. |
 | `-execution-timeout` | `15m` | Positive per-configuration JSON-RPC request timeout. Later documents continue on a fresh server after a timeout. |
 
 Use `-help` for flags. There are no subcommands, daemon configuration files or
@@ -446,24 +448,24 @@ set primary priority, and no numeric priority parsing is performed.
 Ordering does not establish dependencies: changing `30-app.yaml` does not
 execute an unchanged `10-preparation.yaml`.
 
-Each pass rediscovers documents; unchanged files
-are executed with their effective operation because machine state may drift.
-Reconcile all configurations immediately on startup, then wait the full interval
-after each completed full pass before starting the next.
+Each full pass rediscovers documents and executes only those that are due.
+Discovery starts immediately on startup, but a fresh matching result prevents
+unnecessary execution after a restart. Wait the full interval after each completed
+full pass before starting the next.
 Passes never overlap, and slow passes do not cause catch-up runs.
 
 Each pass normally starts **one short-lived `dsc server`**, initializes its
 MCP/JSON-RPC stdio session, and uses `invoke_dsc_config` to execute each configuration
-sequentially. Different configurations can use `set` and `test` in the same
+sequentially. Different configurations can use `set`, `test` and `export` in the same
 session. The server is closed before the pass ends; DSC is not kept alive
-during the interval. Empty directories start no server. Input errors do not
-require starting a server.
+during the interval. Empty directories, passes with no due configurations, and
+passes containing only input errors start no server.
 
 Ordinary DSC errors fail that input but retain the same session. Server crashes,
 timeouts and invalid protocol responses destroy the current session; the next
 configuration starts a fresh one. This restart is fault recovery, not a retry of
 the failed input. Server startup/initialization failure publishes failures for
-remaining readable inputs, reports a pass-level error and retries next pass.
+remaining due/readable inputs, reports a pass-level error and retries when due.
 
 `*.parameters.yaml` and `*.parameters.json` are reserved parameter sidecars,
 never standalone configurations. Match by the configuration filename
@@ -543,8 +545,10 @@ configuration. Updating parameters for an **existing** configuration intentional
 triggers execution immediately; a subsequent configuration update can trigger
 another attempt. This is not an atomic multi-file transaction. Publish via
 temporary-file replacement rather than in-place editing, which can expose
-incomplete input. Periodic full passes still execute unchanged files to correct
-machine drift and recover missed events.
+incomplete input. Periodic full passes execute due configurations to correct
+machine drift and recover missed events. Filesystem-triggered attempts bypass
+frequency checks, even when the current inputs match a fresh result; they publish
+a normal result establishing the next frequency checkpoint.
 
 ### Per-configuration metadata
 
@@ -557,7 +561,8 @@ this JSON configuration select the same audit-only operation:
   "$schema": "https://aka.ms/dsc/schemas/v3/bundled/config/document.json",
   "metadata": {
     "dscd": {
-      "operation": "test"
+      "operation": "test",
+      "frequency": "30m"
     }
   },
   "resources": [
@@ -572,17 +577,53 @@ this JSON configuration select the same audit-only operation:
 }
 ```
 
-Only `operation` has behavior today. It accepts exactly `"set"` (enforce desired
-state) or `"test"` (audit only), with case-sensitive property names and values.
+`operation` accepts exactly `"set"` (enforce desired state), `"test"` (audit only),
+or `"export"` (export observed resource state). `get` is not supported.
+Property names and operation values are case-sensitive.
 Missing `metadata`, missing `dscd`, empty objects, or an omitted `operation`
 mean **`set`**. Unrelated metadata namespaces (including `Microsoft.DSC`),
 unknown `dscd` properties and unknown top-level fields are ignored, including
 arbitrary nested objects, arrays, scalars and nulls. They remain in the original
 document sent to DSC.
 
+`frequency` is an optional positive Go duration string, such as `5m`, `30m`,
+`1h`, `12h` or `24h`. Zero, negative, malformed and non-string values are invalid;
+`1d` is not a Go duration. Omitted frequency defaults to **15m for set/test**
+and **24h for export**. Frequency without operation means `set` with that frequency.
+YAML aliases and merge keys work for both fields.
+
+For enforcement every five minutes, embed this metadata in a configuration:
+
+```yaml
+metadata:
+  dscd:
+    operation: set
+    frequency: 5m
+```
+
+For observed-state export every twelve hours, publish an ordinary configuration,
+for example `inventory.yaml`, in the same input directory:
+
+```yaml
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+metadata:
+  dscd:
+    operation: export
+    frequency: 12h
+resources:
+  - name: installedServices
+    type: DscExtras.Linux/services
+    properties:
+      name: placeholder
+```
+
+This is illustrative: DSC and each resource's schema determine required export
+properties. A document can contain multiple resource types. There is no inventory
+directory, aggregation or resource deduplication.
+
 The document, `metadata`, and `metadata.dscd` must be objects when present.
 An invalid known value, including null/non-string `operation`, an empty string,
-or unsupported spelling, never falls back to `set`. Malformed JSON/YAML,
+or unsupported spelling, or an invalid frequency, never falls back to defaults. Malformed JSON/YAML,
 multiple YAML documents, ambiguous keys along the metadata path, or unreadable
 input produces an `input` failure for only that configuration, without invoking
 DSC; later configurations continue. Changes trigger targeted reconciliation,
@@ -599,14 +640,38 @@ A successful `test` that reports `inDesiredState: false` is still a successful
 execution. `dscd` preserves the structured `dscResult` for consumers to inspect
 without interpreting individual resources.
 
+### Frequency and periodic sweeps
+
+`-interval` controls discovery frequency, not each document's execution frequency.
+During a full sweep, `dscd` protects and captures the current inputs, parses
+metadata, computes the operation-aware `inputHash`, and reads that configuration's
+existing result. It executes when there is no usable result, the operation or hash
+differs, or at least `frequency` has elapsed since `finishedAt`. Due work waits for
+the next sweep; there are no per-document timers.
+
+The latest result is the only persisted scheduling checkpoint. Both successful
+and failed attempts count, including failed exports; frequency is the minimum
+delay **between completed attempts**, not between successful runs. Missing,
+unreadable, malformed, unsupported or otherwise unusable result metadata and
+future/invalid timestamps cannot suppress execution. Invalid current inputs still
+produce input-failure results without invoking DSC.
+
+Restarting performs immediate discovery but does not rerun a fresh matching
+configuration. Configuration, parameter, operation or frequency changes change
+the input identity and force execution. Filesystem notifications bypass frequency
+and run promptly after active work, resetting the persisted completion checkpoint.
+Skipped configurations neither invoke DSC nor replace their result files.
+No timestamp files, scheduling database or restart-dependent in-memory history
+are used. Deleting a result makes that configuration due at the next sweep.
+
 ### DSC inputs
 
-Beyond document syntax and `metadata.dscd.operation`, DSC owns validation,
+Beyond document syntax and `metadata.dscd` operation/frequency, DSC owns validation,
 resource discovery, parameter interpretation, defaults, substitution, secure
 values and execution. `dscd` does not inspect individual resources or merge either
 input. It sends the captured configuration
 and optional sidecar text inline through `invoke_dsc_config` with the effective
-`set` or `test` operation; DSC handles resource semantics.
+`set`, `test` or `export` operation; DSC handles resource semantics.
 
 **Migration from CLI parameter files:** the server tool expects a direct mapping:
 
@@ -654,7 +719,7 @@ root, using `/` on both platforms. Root-level identifiers are unchanged.
 Two fields are included when available: `parameters` is the selected sidecar path,
 and `inputHash` is the combined SHA-256 identity of the exact submitted
 configuration/parameter bytes and effective operation. Changing parameters or
-switching `set`/`test` changes the identity; absent and empty parameters differ.
+switching `set`/`test`/`export` changes the identity; absent and empty parameters differ.
 Omitted and explicit `set` metadata have the same operation but different
 configuration bytes and therefore different hashes. The operation-aware hash
 retains the `dscd-input-v2` framing, and the result envelope remains schema version 1.
@@ -686,6 +751,15 @@ values are preserved in `dscResult`. `exitCode` is null for success and normal
 DSC errors; a failed request may record the actual server exit code, including
 forced termination. `stderr` remains present but is empty: a shared server stream
 cannot be reliably attributed to one configuration.
+Set/test responses retain their existing `metadata`, `results`, `messages` and
+`hadErrors` validation. Export uses DSC 3.3.0's singular optional `result` object
+(the exported document), with optional/null `metadata`, `executionInformation`
+and `outputs`, required `messages` and boolean `hadErrors`. The exported document
+may be omitted or null. The complete original DSC payload is preserved in
+`dscResult`, without flattening or interpreting exported resources. Export
+`hadErrors: true` produces a normal failed attempt, not a separate result schema.
+`inventory.yaml` writes `inventory.yaml.result.json`, including for failed exports;
+nested paths mirror the input tree as for every other operation.
 See the [design](docs/design.md#result-contract) for precedence and field semantics.
 
 Combined configuration/parameter input, including embedded metadata, is limited
@@ -727,7 +801,8 @@ Publication writes, syncs and closes a private temporary file before replacement
 
 A failed attempt replaces the old success if publication succeeds. Publication
 failure is logged separately and leaves readers with a potentially stale prior
-result; the next scheduled pass retries naturally. Readers must check timestamps,
+result; later sweeps use that last persisted checkpoint to determine when to retry.
+Readers must check timestamps,
 input existence and schema version, and tolerate unknown fields.
 
 ## Linux service: systemd

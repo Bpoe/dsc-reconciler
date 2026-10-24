@@ -7,90 +7,124 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Bpoe/dsc-reconciler/internal/dsc"
 	"go.yaml.in/yaml/v3"
 )
 
-func configurationOperation(path, text string) (dsc.Operation, error) {
+type metadata struct {
+	operation dsc.Operation
+	frequency time.Duration
+}
+
+func configurationMetadata(path, text string) (metadata, error) {
 	// JSON is also allowed in .yaml files. Use its own decoder: YAML parsers
 	// need not accept every JSON string escape (notably UTF-16 surrogate pairs).
 	raw := []byte(text)
 	if json.Valid(raw) {
-		return jsonConfigurationOperation(path, raw)
+		return jsonConfigurationMetadata(path, raw)
 	}
 	if filepath.Ext(path) == ".json" {
-		return "", fmt.Errorf("configuration %q must be valid JSON", path)
+		return metadata{}, fmt.Errorf("configuration %q must be valid JSON", path)
 	}
 	decoder := yaml.NewDecoder(strings.NewReader(text))
 	var document, trailing yaml.Node
 	if decoder.Decode(&document) != nil || decoder.Decode(&trailing) != io.EOF {
 		// Parser errors can include input values, so do not expose their text.
-		return "", fmt.Errorf("configuration %q must contain a single valid JSON or YAML document", path)
+		return metadata{}, fmt.Errorf("configuration %q must contain a single valid JSON or YAML document", path)
 	}
 	node := &document
 	location := "configuration"
-	for _, key := range []string{"metadata", "dscd", "operation"} {
+	var fields map[string]yaml.Node
+	for _, key := range []string{"", "metadata", "dscd"} {
+		if key != "" {
+			value, ok := fields[key]
+			if !ok {
+				return defaultMetadata(dsc.OperationSet), nil
+			}
+			node = &value
+			location += "." + key
+		}
 		// Decode only this mapping level; unrelated values remain untyped nodes.
 		// Decode also resolves YAML mapping aliases and merge keys.
-		var fields map[string]yaml.Node
+		fields = nil
 		if node.Decode(&fields) != nil || fields == nil {
-			return "", fmt.Errorf("configuration %q: %s must be an object with unique keys", path, location)
+			return metadata{}, fmt.Errorf("configuration %q: %s must be an object with unique keys", path, location)
 		}
-		value, ok := fields[key]
-		if !ok {
-			return dsc.OperationSet, nil
+	}
+	return parseMetadata(path, func(name string) (string, bool, bool) {
+		value, present := fields[name]
+		for value.Kind == yaml.AliasNode {
+			value = *value.Alias
 		}
-		node = &value
-		location += "." + key
-	}
-	for node.Kind == yaml.AliasNode {
-		node = node.Alias
-	}
-	operation := dsc.Operation(node.Value)
-	if node.Kind != yaml.ScalarNode || node.Tag != "!!str" ||
-		(operation != dsc.OperationSet && operation != dsc.OperationTest) {
-		return "", fmt.Errorf("configuration %q: metadata.dscd.operation must be \"set\" or \"test\"", path)
-	}
-	return operation, nil
+		return value.Value, present, value.Kind == yaml.ScalarNode && value.Tag == "!!str"
+	})
 }
 
-func jsonConfigurationOperation(path string, raw []byte) (dsc.Operation, error) {
+func jsonConfigurationMetadata(path string, raw []byte) (metadata, error) {
 	// The entire document has passed json.Valid, including values we do not inspect.
 	location := "configuration"
-	for _, key := range []string{"metadata", "dscd", "operation"} {
+	var fields map[string]json.RawMessage
+	for _, key := range []string{"", "metadata", "dscd"} {
+		if key != "" {
+			selected := fields[key]
+			if selected == nil {
+				return defaultMetadata(dsc.OperationSet), nil
+			}
+			raw = selected
+			location += "." + key
+		}
 		decoder := json.NewDecoder(bytes.NewReader(raw))
 		token, err := decoder.Token()
 		if err != nil || token != json.Delim('{') {
-			return "", fmt.Errorf("configuration %q: %s must be an object", path, location)
+			return metadata{}, fmt.Errorf("configuration %q: %s must be an object", path, location)
 		}
-		var selected json.RawMessage
-		seen := make(map[string]bool)
+		fields = make(map[string]json.RawMessage)
 		for decoder.More() {
 			token, err := decoder.Token()
 			name, ok := token.(string)
-			if err != nil || !ok || seen[name] {
-				return "", fmt.Errorf("configuration %q: %s must have unique keys", path, location)
+			if err != nil || !ok || fields[name] != nil {
+				return metadata{}, fmt.Errorf("configuration %q: %s must have unique keys", path, location)
 			}
-			seen[name] = true
 			var value json.RawMessage
 			if decoder.Decode(&value) != nil {
-				return "", fmt.Errorf("configuration %q must be valid JSON", path)
+				return metadata{}, fmt.Errorf("configuration %q must be valid JSON", path)
 			}
-			if name == key {
-				selected = value
-			}
+			fields[name] = value
 		}
-		if selected == nil {
-			return dsc.OperationSet, nil
+	}
+	return parseMetadata(path, func(name string) (string, bool, bool) {
+		raw, present := fields[name]
+		var value string
+		err := json.Unmarshal(raw, &value)
+		return value, present, err == nil && !bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+	})
+}
+
+func defaultMetadata(operation dsc.Operation) metadata {
+	frequency := 15 * time.Minute
+	if operation == dsc.OperationExport {
+		frequency = 24 * time.Hour
+	}
+	return metadata{operation: operation, frequency: frequency}
+}
+
+func parseMetadata(path string, field func(string) (value string, present, isString bool)) (metadata, error) {
+	operation := dsc.OperationSet
+	if value, present, isString := field("operation"); present {
+		operation = dsc.Operation(value)
+		if !isString || !operation.Valid() {
+			return metadata{}, fmt.Errorf("configuration %q: metadata.dscd.operation must be \"set\", \"test\" or \"export\"", path)
 		}
-		raw = selected
-		location += "." + key
 	}
-	var operation dsc.Operation
-	if json.Unmarshal(raw, &operation) != nil ||
-		(operation != dsc.OperationSet && operation != dsc.OperationTest) {
-		return "", fmt.Errorf("configuration %q: metadata.dscd.operation must be \"set\" or \"test\"", path)
+	options := defaultMetadata(operation)
+	if value, present, isString := field("frequency"); present {
+		frequency, err := time.ParseDuration(value)
+		if !isString || err != nil || frequency <= 0 {
+			return metadata{}, fmt.Errorf("configuration %q: metadata.dscd.frequency must be a positive Go duration string", path)
+		}
+		options.frequency = frequency
 	}
-	return operation, nil
+	return options, nil
 }

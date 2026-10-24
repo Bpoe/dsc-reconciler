@@ -14,9 +14,15 @@ type Operation string
 
 // Supported configuration operations.
 const (
-	OperationSet  Operation = "set"
-	OperationTest Operation = "test"
+	OperationSet    Operation = "set"
+	OperationTest   Operation = "test"
+	OperationExport Operation = "export"
 )
+
+// Valid reports whether the operation is supported by dscd.
+func (o Operation) Valid() bool {
+	return o == OperationSet || o == OperationTest || o == OperationExport
+}
 
 // Input holds source identity, validated operation and immutable UTF-8 text.
 // Paths identify inputs; the server receives only the operation and captured text.
@@ -64,7 +70,7 @@ type Result struct {
 
 func newResult(input Input, start time.Time) Result {
 	r := Result{SchemaVersion: 1, Configuration: filepath.Base(input.Configuration), StartedAt: start.UTC(), Outcome: "succeeded"}
-	if input.Operation == OperationSet || input.Operation == OperationTest {
+	if input.Operation.Valid() {
 		r.Operation = &input.Operation
 	}
 	if input.Parameters != "" {

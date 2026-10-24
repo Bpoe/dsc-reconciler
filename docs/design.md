@@ -19,8 +19,9 @@ the existence of implementation or CI configuration alone is not a test result.
 
 ## Purpose and scope
 
-`dscd` repeatedly applies local desired state by default, or audits it when
-per-configuration metadata selects `test`. Its job is to discover, order,
+`dscd` repeatedly applies local desired state by default, audits it with `test`,
+or exports observed state with `export`, at each configuration's frequency.
+Its job is to discover, order,
 execute, record, and repeat. It requires local configuration files and the DSC
 executable; it has no network service dependency of its own. DSC resources may
 have their own dependencies.
@@ -76,7 +77,7 @@ The initial configuration uses the standard `flag` package:
 | `--version` | `Version` | `false` | Print `dscd <version>` to stdout and exit without daemon startup. |
 | `-config-dir` | `ConfigDir` | Linux: `/etc/dsc/config.d`; Windows: `%ProgramData%\dsc\config.d` | Directory containing DSC documents. |
 | `-results-dir` | `ResultsDir` | Linux: `/var/lib/dsc/results.d`; Windows: `%ProgramData%\dsc\results.d` | Directory containing latest execution results. |
-| `-interval` | `Interval` | `5m` | Delay after each completed full reconciliation pass; must be positive. Targeted work does not reset it. |
+| `-interval` | `Interval` | `5m` | Delay after each completed full discovery sweep; must be positive. Execute only due configurations. Targeted work does not reset it. |
 | `-dsc-path` | `DSCPath` | Windows: adjacent `dsc\dsc.exe`, then `dsc`; Linux: `dsc` | Explicit executable path or name overrides automatic selection. |
 | `-execution-timeout` | `ExecutionTimeout` | `15m` | Positive maximum duration of each configuration JSON-RPC request. |
 
@@ -234,11 +235,13 @@ are unchanged.
 `dscd` remains the long-running daemon. Each nonempty pass normally uses one
 short-lived `dsc server`, started lazily before its first executable configuration.
 All configurations in that pass share its initialized session and are submitted
-sequentially. Empty passes, or passes with only invalid/unreadable inputs, start no
+sequentially. Empty passes, passes with no due configurations, or passes with only invalid/unreadable inputs, start no
 server. The session is always closed before the pass returns. DSC is never kept
 running while `dscd` waits between passes.
 
-Reconcile all configurations immediately on startup. After each full pass completes, including all result
+Discover all configurations immediately on startup, executing only due inputs.
+A fresh matching result survives restart and suppresses unnecessary execution.
+After each full pass completes, including all result
 publication attempts and server shutdown, wait the full configured interval before starting the next
 full pass. Targeted work can run during this interval but never resets its timer.
 Pass-level failures use the same delay before retrying. Slow passes never
@@ -252,15 +255,18 @@ validate startup
 register directory watch (failure is nonfatal)
 run one pass immediately:
     discover and sort configurations
-    protect each configuration, re-pair and capture inputs, start server if needed,
-        submit sequentially, publish result, release protection
+    protect each configuration, re-pair, capture inputs and parse metadata
+    compare operation/hash/finishedAt in its latest result with current inputs/frequency
+    if due: start server if needed, submit sequentially, publish result
+    release protection (also when skipped)
     close the server
 until canceled, serially:
     if full pass is due:
         revalidate directory identity and restore watch if needed
         run full pass; reset interval after completion
     else if input notifications are pending:
-        discover affected configuration; execute and publish; close server
+        discover affected configuration; execute regardless of frequency,
+            publish a new checkpoint; close server
     else:
         wait for cancellation, full-pass timer, watcher failure, or input notification
 ```
@@ -271,8 +277,50 @@ publication. A publication error is logged separately and does not suppress
 attempts on later documents. Cancellation stops new attempts.
 
 Every pass rediscovers inputs. File changes also trigger targeted reconciliation;
-the daemon does not cache a permanent document list or skip unchanged documents,
-because machine state may drift even when a file has not changed.
+the daemon does not cache a permanent document list. Unchanged configurations run
+again when their frequency elapses because machine state may drift.
+
+### Result-based frequency scheduling
+
+The full-pass interval is a discovery delay, not a per-configuration execution
+frequency. Under configuration protection, capture the current configuration and
+parameters, parse operation/frequency, and compute the existing operation-aware
+input hash. Read the mirrored latest-result file before deciding whether to
+execute; the protected snapshot used for this decision is exactly what DSC receives.
+
+Execute when no prior result exists, it cannot be safely read/decoded, its
+operation or hash differs, or `now - finishedAt >= frequency`. A result can
+suppress execution only with schema version 1, matching configuration identity,
+a valid operation and hash, completed outcome, and usable completion timestamp.
+Zero/invalid/future completion timestamps, invalid operations, unsupported schemas
+and other unusable scheduling metadata make the input due. Previous results are
+read only from regular files and nonredirected parents, with bounded UTF-8 JSON
+decoding and unique envelope keys. The read bound allows up to sixfold JSON-escape
+growth from a 16 MiB DSC frame plus 1 MiB of envelope/path overhead; the transport
+limit remains 16 MiB.
+Read/validation failures are diagnosed without logging result contents. Missing
+results are normal. Cancellation during a result read prevents execution.
+
+Use the latest attempt, not the latest successful attempt. Success, failure and
+cancellation results all establish a completion checkpoint if their metadata is
+usable. A failed export therefore respects its 24-hour default instead of retrying
+at every five-minute sweep. Input failures remain input failures on every sweep;
+never invent a valid policy when current metadata is invalid.
+
+Skipped configurations neither invoke DSC nor republish results. A pass containing
+no due/executable configurations starts no server. No per-document timer,
+last-run file, database or in-memory execution history is added. On restart an
+immediate discovery still checks these persisted checkpoints. A missed input change
+is detected by operation/hash mismatch at the next sweep, including frequency edits
+because the original metadata bytes are hashed. Deleting a result makes its
+configuration due. A due frequency is serviced at the next serial sweep, not at an
+independent deadline.
+
+Filesystem-triggered work bypasses this check even if the same snapshot has a
+fresh result. It publishes the normal result, whose `finishedAt` anchors subsequent
+full-pass scheduling. Watcher recovery full passes use the same due checks as other
+full passes. Full-pass interval/reset/priority semantics and configuration protection
+remain unchanged.
 
 Configuration removal stops future attempts and does not undo machine changes. Existing result
 files remain until a producer or operator removes them. They are historical
@@ -408,21 +456,29 @@ joins the collector without waiting for a scheduler acknowledgment.
 
 ### Per-configuration metadata
 
-`dscd` extracts `metadata.dscd.operation` from the captured `.yaml` or `.json`
+`dscd` extracts `metadata.dscd.operation` and `metadata.dscd.frequency` together from the captured `.yaml` or `.json`
 configuration under `internal/reconcile`. `encoding/json` handles JSON, including
 JSON documents stored as `.yaml`; `go.yaml.in/yaml/v3` parses YAML document nodes.
 Only mappings along the metadata path are decoded. Unrelated values remain raw
 JSON or YAML nodes, without deserialization into a DSC schema.
 YAML mapping aliases and merge keys are resolved when extracting metadata, so
-an inherited `test` operation cannot be overlooked. The source text is never
+an inherited operation or frequency cannot be overlooked. The source text is never
 rewritten or stripped before submission.
 
-The only supported property today is `operation`, whose values are exactly
-`"set"` and `"test"`. Property names are also case-sensitive. Missing `metadata`,
+`operation` accepts exactly `"set"`, `"test"` and `"export"`; `get` is not supported.
+Property names are also case-sensitive. Missing `metadata`,
 missing `dscd`, empty objects, or an omitted `operation` mean `set`. Unknown
 top-level properties, metadata namespaces (including `Microsoft.DSC`) and `dscd`
 properties are ignored. Unknown values may contain arbitrary nested objects,
 arrays, strings, numbers, booleans and nulls.
+
+`frequency` accepts positive strings parsed by `time.ParseDuration`, for example
+`5m`, `30m`, `1h`, `12h` and `24h`. Reject zero, negative, malformed, overflowing,
+null and non-string values without echoing the supplied values or parser errors.
+Omitted frequency defaults to **15m for set/test**, **24h for export**.
+Frequency without operation defaults to `set`. Explicit frequency overrides the
+effective operation's default. YAML aliases, merge precedence, duplicate-key
+handling and case sensitivity remain the same as for operation extraction.
 
 For example, `web.yaml` selects audit-only execution:
 
@@ -431,6 +487,7 @@ $schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
 metadata:
   dscd:
     operation: test
+    frequency: 30m
 resources:
   - name: Example
     type: Microsoft.DSC.Debug/Echo
@@ -443,7 +500,7 @@ The equivalent `web.json` configuration is:
 ```json
 {
   "$schema": "https://aka.ms/dsc/schemas/v3/bundled/config/document.json",
-  "metadata": {"dscd": {"operation": "test"}},
+  "metadata": {"dscd": {"operation": "test", "frequency": "30m"}},
   "resources": [
     {
       "name": "Example",
@@ -454,6 +511,34 @@ The equivalent `web.json` configuration is:
 }
 ```
 
+For custom enforcement every five minutes, use this metadata in a DSC document:
+
+```yaml
+metadata:
+  dscd:
+    operation: set
+    frequency: 5m
+```
+
+For export every twelve hours, an ordinary `inventory.yaml` could contain:
+
+```yaml
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+metadata:
+  dscd:
+    operation: export
+    frequency: 12h
+resources:
+  - name: installedServices
+    type: DscExtras.Linux/services
+    properties:
+      name: placeholder
+```
+
+This is illustrative; DSC and the resource schemas decide required export
+properties. A configuration can contain one or many resource types; there is no
+export-specific directory, filename convention, indexing, aggregation or deduplication.
+
 **Omitted embedded operation means `set`. Placing a configuration in the input directory
 normally authorizes DSC to enforce its desired state.** Producers opting into
 audit-only behavior must include the metadata in the published document. Removing
@@ -463,7 +548,7 @@ Either configuration format can still use either parameter-sidecar format.
 The document root, `metadata` and `metadata.dscd` must be objects when present,
 with unique keys at those levels. Explicit null containers are invalid, not
 missing objects. Invalid operations (including null, non-string values, empty
-strings or other spellings) never fall back to `set`. Malformed JSON/YAML,
+strings or other spellings) and invalid frequencies never fall back to defaults. Malformed JSON/YAML,
 multiple YAML documents, invalid UTF-8, oversized, unreadable or nonregular
 inputs produce an `input` failure for only that configuration. Diagnostics
 identify the configuration path and relevant field without echoing input values
@@ -474,8 +559,8 @@ The companion `.dscd.json` mechanism is removed, without backward compatibility.
 Former companion files are ordinary `.json` configuration candidates, including
 orphans; move their operation into the configuration and remove them before
 upgrading. `.dscd.yaml` likewise has no special meaning, and `.yml` remains ignored.
-There is no daemon-wide operation flag, folder-based policy, or per-configuration
-schedule or timeout. Different operations share the same serial, pass-scoped session.
+There is no daemon-wide operation flag, folder-based policy, per-configuration
+timer or timeout. Different operations share the same serial, pass-scoped session.
 
 ## DSC server transport and outcome
 
@@ -485,6 +570,9 @@ Older CLI-only versions are not supported and there is
 no per-document CLI fallback. The contract follows DSC's version-tagged
 [server tests](https://github.com/PowerShell/DSC/blob/v3.3.0/dsc/tests/dsc_server.tests.ps1)
 and [configuration tool implementation](https://github.com/PowerShell/DSC/blob/v3.3.0/dsc/src/server/invoke_dsc_config.rs).
+Export's envelope follows the version-tagged
+[`ConfigurationExportResult`](https://github.com/PowerShell/DSC/blob/v3.3.0/lib/dsc-lib/src/configure/config_result.rs)
+and its derived schema.
 Real DSC execution remains opt-in; other versions require this same protocol.
 
 Start the resolved executable as `dsc server`, without a shell. Stdin/stdout carry
@@ -495,7 +583,7 @@ and tool capabilities, then send `notifications/initialized` without an ID.
 Initialization is bounded by the smaller of ten seconds and the execution timeout.
 
 Each configuration sends one `tools/call` request naming `invoke_dsc_config`,
-with arguments `operation: "<effective set or test>"`, `configuration: "<captured text>"`, and
+with arguments `operation: "<effective set, test or export>"`, `configuration: "<captured text>"`, and
 `parameters: "<captured text>"` only when a sidecar exists. IDs increase within
 each session, starting configuration requests at 2. Only one request is outstanding.
 Validate JSON-RPC version, response shape and exact ID. Ignore well-formed
@@ -514,20 +602,28 @@ the unusable server, publish the current attempt, and start a fresh session for
 the next configuration. Restarting inside a pass is fault recovery only; do not
 retry the failed input within that pass. Cancellation stops further attempts.
 If starting or initializing a session fails, publish `start` failures for the
-remaining readable/unambiguous inputs and return one pass-level error. Do not
-repeatedly attempt startup for every file; retry on the next pass. Discovery/input
+remaining due/readable/unambiguous inputs and return one pass-level error. Do not
+repeatedly attempt startup for every file; retry on a later due attempt. Discovery/input
 failures still retain their own classification.
 
-Parse only the result envelope needed to assess execution. Require a JSON object
+Parse only the result envelope needed to assess execution. For set/test require a JSON object
 with object-valued `metadata`, array-valued `results` and `messages`, and a boolean
-`hadErrors`. Preserve its payload without interpreting individual resource properties
+`hadErrors`, preserving existing validation. For export require a JSON object
+with array-valued `messages` and boolean `hadErrors`. Export's singular `result`
+is an optional exported DSC configuration object; accept its omission or null.
+Optional `metadata`, `executionInformation` and `outputs` also accept omitted,
+null or object values. Reject malformed envelope field types, but do not validate
+the exported configuration's nested schema, resource count, names, properties or
+identities. Preserve the entire original object, including optional/unknown fields.
+Never flatten, normalize or deduplicate export resources.
+Preserve its payload without interpreting individual resource properties
 or rejecting unknown fields. Success means a successful RPC with a valid DSC result
 and `hadErrors: false`, not a per-operation process exit or permanent compliance.
 A successful `test` with resource-level `inDesiredState: false` reports drift,
 not an execution failure. Preserve that information in `dscResult`; do not
 translate resource state into daemon outcomes.
 
-Except for document syntax and `metadata.dscd.operation`, configuration contents
+Except for document syntax and `metadata.dscd` operation/frequency, configuration contents
 remain opaque to `dscd`; parameter sidecars are entirely opaque. DSC owns schema
 validation, resource discovery, parameter interpretation, defaults, substitution,
 secure values, testing and configuration execution. The daemon does not model
@@ -554,7 +650,7 @@ bytes. `inputHash` is `sha256:` followed
 by the lowercase hexadecimal SHA-256 of the concatenation of
 `"dscd-input-v2\0"`, the 32-byte configuration digest, a one-byte sidecar-present
 marker (0 or 1), the 32-byte parameter digest when present, a zero byte, and the
-UTF-8 effective operation (`set` or `test`). This framing
+UTF-8 effective operation (`set`, `test` or `export`). This framing
 distinguishes missing from empty sidecars and keeps file boundaries unambiguous.
 Names are recorded separately; changing configuration or parameter bytes, or
 the effective operation, changes the hash. Embedded metadata bytes are part of
@@ -564,8 +660,10 @@ and explicit `set` resolve to the same operation but have different hashes when
 their configuration bytes differ.
 The v2 hash framing deliberately changes hashes from the previous v1 framing
 even for `set`, independently of the unchanged result-envelope schema version.
-The hash identifies the exact desired-state input submitted for an attempt,
-not a skip/reconciliation cache key. For input/start failures it may describe a
+The hash identifies the exact input submitted for an attempt. Together with
+operation and `finishedAt`, it determines whether a periodic attempt is due;
+it never suppresses filesystem-triggered work or due drift correction.
+For input/start failures it may describe a
 captured input that could not be submitted. Changes after capture cannot change
 the submitted strings. Configuration protection and the
 [publisher contract](#per-configuration-protection-and-publishers) keep the
@@ -604,7 +702,7 @@ The initial envelope uses the following fields:
 | --- | --- | --- |
 | `schemaVersion` | integer | `1` for this envelope contract. |
 | `configuration` | string | Source path relative to `ConfigDir`, normalized with `/`, including its extension. Root-level identifiers are unchanged. |
-| `operation` | string or null | Effective `set` or `test`, including implicit `set`; matches the submitted operation whenever DSC is invoked. Null if metadata or an earlier input failure prevents resolving the operation; DSC is not invoked. |
+| `operation` | string or null | Effective `set`, `test` or `export`, including implicit `set`; matches the submitted operation whenever DSC is invoked. Null if metadata or an earlier input failure prevents resolving the operation; DSC is not invoked. |
 | `parameters` | optional string | Selected parameter-sidecar path relative to `ConfigDir`, normalized with `/`; omitted when no unique sidecar was selected. Never contains parameter values. |
 | `inputHash` | optional string | Combined SHA-256 of captured configuration/parameter strings and effective operation; omitted when capture or metadata validation fails. Start failures can retain a hash of input not submitted. |
 | `startedAt` | string | UTC RFC 3339 timestamp with fractional seconds as needed. |
@@ -680,6 +778,12 @@ v1 records without those fields. Changes to existing field meaning, required
 fields, or outcome semantics require a versioned contract change. DSC's nested
 schema has its own version and compatibility requirements.
 
+Export uses this same schema-version-1 envelope and filename mapping:
+`inventory.yaml` produces `inventory.yaml.result.json`, with its complete export
+response under `dscResult`, and nested paths mirror the input tree. Failed exports
+produce normal failed results. There is no separate result writer or backend-specific
+behavior; the daemon remains standalone and does not change Registry or Sync.
+
 There is no in-progress record, attempt history, desired generation, or
 resource-status translation in v1. A reader checks freshness
 using timestamps and input existence, and must tolerate seeing the previous
@@ -728,7 +832,8 @@ A new failed attempt replaces an old success when publication succeeds. If
 publication fails before replacement, the previous complete result remains and
 may become stale. Logs are the available signal for that storage failure; the
 daemon cannot reliably record the failure into the same broken result store.
-The next scheduled attempt is the normal retry opportunity.
+Subsequent sweeps use the most recent persisted checkpoint to decide when to retry;
+a failed publication does not create an additional retry/scheduling record.
 
 ## Errors, logging, and shutdown
 
@@ -740,7 +845,7 @@ The next scheduled attempt is the normal retry opportunity.
 | Configuration disappears, becomes stale while waiting, or conflicts with a Windows publisher handle | Skip without a result; rediscover on later notifications or passes. |
 | Other input-read errors or DSC failures | Publish a failed attempt and continue to later documents. |
 | DSC returns unusable RPC output or reports errors | Publish a failed attempt; restart only an unusable session. |
-| Server startup/initialization fails | Publish remaining input failures as described above, log a pass-level error, retry next pass. |
+| Server startup/initialization fails | Publish failures for remaining due/readable inputs as described above, log a pass-level error, retry when due. |
 | Result publication fails | Log source, destination, and error; continue; retry through later reconciliation. |
 | Shutdown is requested | Stop scheduling, cancel active execution, clean up, and exit normally. |
 
@@ -751,7 +856,7 @@ noise at debug level and log errors where handled rather than at every layer.
 DSC output and resource properties may contain secrets: store only in protected
 result files and do not mirror them into routine logs. Never log configuration,
 parameter or arbitrary metadata contents; operation logs use only validated
-`set`/`test` values (or null when unresolved).
+`set`/`test`/`export` values (or null when unresolved).
 
 In foreground mode, `signal.NotifyContext` owns shutdown at the command boundary
 (SIGINT/SIGTERM on Linux, Ctrl+C on Windows). SCM Stop and Shutdown controls
@@ -1021,6 +1126,11 @@ interfaces, and controlled helper processes. Cover sorted discovery, ignored
 entries, input changes between passes, continuation after errors, cancellation,
 non-overlap, stdout/stderr separation, result classification, JSON compatibility,
 filename collisions, failed publication, and complete replacement visibility.
+Frequency tests use persisted results and deterministic time to cover per-operation
+defaults/overrides, restart skips, completion-time boundaries, failed attempts,
+invalid/unreadable checkpoints, input changes, and targeted checkpoint updates.
+Fake server tests cover mixed operations and export's optional/null result fields
+while retaining set/test envelope validation and the 16 MiB transport bound.
 Tests must not require DSC or mutate the host's desired state. Real-DSC tests are
 opt-in and must run only in a disposable, explicitly configured environment.
 

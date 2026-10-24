@@ -96,4 +96,32 @@ resources:
 			})
 		}
 	}
+	for _, document := range documents {
+		for _, parameter := range parameters {
+			t.Run("export/"+document.ext+"/parameters"+parameter.ext, func(t *testing.T) {
+				in := Input{Configuration: "inventory" + document.ext, Operation: OperationExport, ConfigurationText: document.content}
+				if parameter.ext != "" {
+					in.Parameters = "inventory.parameters" + parameter.ext
+					in.ParametersText = parameter.content
+				}
+				result, err := session.Execute(context.Background(), in)
+				if err != nil || result.Outcome != "succeeded" || result.Operation == nil || *result.Operation != OperationExport {
+					t.Fatalf("real DSC export failed: %+v (%v)", result.Error, err)
+				}
+				var payload struct {
+					Result *struct {
+						Resources []json.RawMessage `json:"resources"`
+					} `json:"result"`
+					HadErrors bool `json:"hadErrors"`
+				}
+				if err := json.Unmarshal(result.DSCResult, &payload); err != nil ||
+					payload.Result == nil || len(payload.Result.Resources) == 0 || payload.HadErrors {
+					t.Fatalf("unexpected Echo export result: %s (%v)", result.DSCResult, err)
+				}
+				if result.ExitCode != nil || result.Stderr != "" {
+					t.Fatal("export synthesized per-operation process diagnostics")
+				}
+			})
+		}
+	}
 }

@@ -2,14 +2,17 @@
 package results
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Bpoe/dsc-reconciler/internal/dsc"
 )
@@ -90,7 +93,7 @@ func (w *Writer) Destination(name string) (string, error) {
 	return path, nil
 }
 
-func (w *Writer) prepareDirectory(dir string) error {
+func (w *Writer) checkDirectory(dir string, create bool) error {
 	relative, err := filepath.Rel(w.dir, dir)
 	if err != nil {
 		return err
@@ -106,7 +109,7 @@ func (w *Writer) prepareDirectory(dir string) error {
 	for _, part := range parts {
 		current = filepath.Join(current, part)
 		info, err := os.Lstat(current)
-		if errors.Is(err, os.ErrNotExist) {
+		if create && errors.Is(err, os.ErrNotExist) {
 			if err := makeDirectory(current); err != nil {
 				return err
 			}
@@ -120,6 +123,82 @@ func (w *Writer) prepareDirectory(dir string) error {
 		}
 	}
 	return nil
+}
+
+// Read reads a regular latest-result file without creating directories or following
+// redirected parents. Context cancellation is checked between filesystem operations.
+func (w *Writer) Read(ctx context.Context, name string) (result dsc.Result, err error) {
+	target, err := w.Destination(name)
+	if err != nil {
+		return result, err
+	}
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("read result %q: %w", target, err)
+		}
+	}()
+	if err = ctx.Err(); err != nil {
+		return result, err
+	}
+	if err = w.checkDirectory(filepath.Dir(target), false); err != nil {
+		return result, err
+	}
+	info, err := os.Lstat(target)
+	if err != nil {
+		return result, err
+	}
+	// Marshal can expand each response byte to a six-byte JSON escape. This is
+	// a read bound for our envelope, not a change to the 16 MiB transport limit.
+	const maxResultBytes = 6*(16<<20) + (1 << 20)
+	if !info.Mode().IsRegular() || info.Size() > maxResultBytes {
+		return result, errors.New("result is not a regular file within the size limit")
+	}
+	f, err := openResultFile(target)
+	if err != nil {
+		return result, err
+	}
+	defer func() { err = errors.Join(err, f.Close()) }()
+	opened, err := f.Stat()
+	if err != nil {
+		return result, err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+		return result, errors.New("result changed while opening")
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxResultBytes+1))
+	if err != nil {
+		return result, err
+	}
+	if err = ctx.Err(); err != nil {
+		return result, err
+	}
+	if len(data) > maxResultBytes || !utf8.Valid(data) {
+		return result, errors.New("result exceeds the size limit or is not UTF-8")
+	}
+	// Reject ambiguous top-level fields before encoding/json's case-insensitive
+	// struct decoding. Never expose parser errors that could contain DSC secrets.
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return result, errors.New("result must be a JSON object")
+	}
+	seen := make(map[string]bool)
+	for decoder.More() {
+		token, err := decoder.Token()
+		key, ok := token.(string)
+		if err != nil || !ok || seen[strings.ToLower(key)] {
+			return result, errors.New("result must have unique envelope fields")
+		}
+		seen[strings.ToLower(key)] = true
+		var value json.RawMessage
+		if decoder.Decode(&value) != nil {
+			return result, errors.New("result must contain valid JSON")
+		}
+	}
+	if json.Unmarshal(data, &result) != nil {
+		return dsc.Result{}, errors.New("result must contain a valid execution envelope")
+	}
+	return result, nil
 }
 
 // Write serializes the result and syncs a private temporary file in the target
@@ -138,7 +217,7 @@ func (w *Writer) Write(ctx context.Context, result dsc.Result) (err error) {
 		return fmt.Errorf("serialize result %q: %w", target, err)
 	}
 	dir := filepath.Dir(target)
-	if err := w.prepareDirectory(dir); err != nil {
+	if err := w.checkDirectory(dir, true); err != nil {
 		return fmt.Errorf("prepare result directory %q: %w", dir, err)
 	}
 	f, err := createTemp(dir)

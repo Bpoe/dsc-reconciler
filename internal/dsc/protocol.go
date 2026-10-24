@@ -125,7 +125,7 @@ func validateInitialization(raw json.RawMessage) error {
 	return nil
 }
 
-func parseToolResult(raw json.RawMessage) (json.RawMessage, bool, string, error) {
+func parseToolResult(raw json.RawMessage, operation Operation) (json.RawMessage, bool, string, error) {
 	var result struct {
 		IsError           json.RawMessage `json:"isError"`
 		StructuredContent struct {
@@ -152,16 +152,29 @@ func parseToolResult(raw json.RawMessage) (json.RawMessage, bool, string, error)
 		}
 		return nil, true, strings.Join(messages, ": "), nil
 	}
-	payload, hadErrors, err := parseOutput(result.StructuredContent.Result)
+	payload, hadErrors, err := parseOutput(result.StructuredContent.Result, operation)
 	return payload, hadErrors, "", err
 }
 
-func parseOutput(data []byte) (json.RawMessage, bool, error) {
+func parseOutput(data []byte, operation Operation) (json.RawMessage, bool, error) {
 	var result map[string]json.RawMessage
 	if !utf8.Valid(data) || !object(data) || json.Unmarshal(data, &result) != nil {
 		return nil, false, errors.New("DSC structuredContent.result must be a JSON object")
 	}
-	for name, opening := range map[string]byte{"metadata": '{', "results": '[', "messages": '['} {
+	required := map[string]byte{"messages": '['}
+	if operation == OperationExport {
+		// DSC 3.3.0 ConfigurationExportResult has optional object-valued fields,
+		// including a singular exported configuration, not resource results.
+		for _, name := range []string{"result", "metadata", "executionInformation", "outputs"} {
+			value := bytes.TrimSpace(result[name])
+			if len(value) != 0 && !bytes.Equal(value, []byte("null")) && value[0] != '{' {
+				return nil, false, fmt.Errorf("DSC export result has invalid %s", name)
+			}
+		}
+	} else {
+		required["metadata"], required["results"] = '{', '['
+	}
+	for name, opening := range required {
 		value := bytes.TrimSpace(result[name])
 		if len(value) == 0 || value[0] != opening {
 			return nil, false, fmt.Errorf("DSC result has missing or invalid %s", name)

@@ -218,11 +218,121 @@ func TestNestedResultParentFailures(t *testing.T) {
 			if err := writer.Write(context.Background(), testResult("blocked/a.yaml", "succeeded")); err == nil {
 				t.Fatal("accepted non-directory or redirected parent")
 			}
+			if _, err := writer.Read(context.Background(), "blocked/a.yaml"); err == nil {
+				t.Fatal("read through a non-directory or redirected parent")
+			}
 			entries, err := os.ReadDir(outside)
 			if err != nil || len(entries) != 0 {
 				t.Fatalf("wrote outside results root: %v, %v", entries, err)
 			}
 			assertNoTemps(t, writer.dir)
 		})
+	}
+}
+
+func TestReadLatestResult(t *testing.T) {
+	writer := newTestWriter(t)
+	for _, name := range []string{"inventory.yaml", "team/deep/inventory.json"} {
+		result := testResult(name, "failed")
+		operation := dsc.OperationExport
+		result.Operation = &operation
+		result.Error = &dsc.Failure{Kind: "dsc", Message: "controlled error"}
+		result.InputHash = "sha256:" + strings.Repeat("a", 64)
+		result.DSCResult = json.RawMessage(`{"result":null,"messages":[],"hadErrors":true}`)
+		if err := writer.Write(context.Background(), result); err != nil {
+			t.Fatal(err)
+		}
+		got, err := writer.Read(context.Background(), name)
+		before, _ := json.Marshal(result)
+		after, _ := json.Marshal(got)
+		if err != nil || string(before) != string(after) {
+			t.Fatalf("read result=%s, want=%s (%v)", after, before, err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := writer.Read(ctx, name); !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled read: %v", err)
+		}
+	}
+	if _, err := writer.Read(context.Background(), "missing/deep/a.yaml"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing result: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(writer.dir, "missing")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("reading a checkpoint created result directories")
+	}
+	for _, name := range []string{"../a.yaml", `a\b.yaml`, "/a.yaml"} {
+		if _, err := writer.Read(context.Background(), name); err == nil {
+			t.Fatalf("accepted invalid read identity %q", name)
+		}
+	}
+}
+
+func TestReadRejectsUnsafeOrInvalidResults(t *testing.T) {
+	writer := newTestWriter(t)
+	target, _ := writer.Destination("web.yaml")
+	for _, content := range []string{
+		"", "null", "[]", "{}{}", `{"operation":"export","operation":"set"}`,
+		`{"operation":"export","Operation":"set"}`, `{"finishedAt":"PRIVATE-RESULT"}`,
+		"{\"stderr\":\"\xff\"}", `{"schemaVersion":`,
+	} {
+		if err := os.WriteFile(target, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writer.Read(context.Background(), "web.yaml"); err == nil || strings.Contains(err.Error(), "PRIVATE-RESULT") {
+			t.Fatalf("invalid or unsafe read: %q (%v)", content, err)
+		}
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := errors.Join(f.Truncate(98<<20), f.Close()); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := writer.Read(context.Background(), "web.yaml"); err == nil {
+		t.Fatal("read an oversized checkpoint")
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Read(context.Background(), "web.yaml"); err == nil {
+		t.Fatal("read a directory as a result")
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.json")
+	if err := os.WriteFile(outside, []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, target); err != nil {
+		t.Logf("result symlink check not exercised: %v", err)
+	} else if _, err := writer.Read(context.Background(), "web.yaml"); err == nil {
+		t.Fatal("followed a result symlink")
+	}
+}
+
+func TestReadAllowsJSONEscapingGrowth(t *testing.T) {
+	writer := newTestWriter(t)
+	result := testResult("inventory.yaml", "succeeded")
+	result.DSCResult = json.RawMessage(`{"result":{"value":"` + strings.Repeat("<", 3<<20) + `"},"messages":[],"hadErrors":false}`)
+	if err := writer.Write(context.Background(), result); err != nil {
+		t.Fatal(err)
+	}
+	got, err := writer.Read(context.Background(), result.Configuration)
+	var payload struct {
+		Result struct {
+			Value string `json:"value"`
+		} `json:"result"`
+	}
+	if err != nil || json.Unmarshal(got.DSCResult, &payload) != nil || payload.Result.Value != strings.Repeat("<", 3<<20) {
+		t.Fatalf("valid result with JSON escaping growth rejected: %v", err)
 	}
 }
