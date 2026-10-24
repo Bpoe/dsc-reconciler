@@ -1,5 +1,5 @@
 name: dscd
-arch: amd64
+arch: ${ARCH}
 platform: linux
 version: ${VERSION}
 maintainer: Bpoe <Bpoe@users.noreply.github.com>

@@ -803,12 +803,17 @@ uses root because arbitrary DSC resources may require system modification; chang
 it to a least-privileged identity when the selected resources permit. Do not daemonize internally
 or invoke `sudo` from the daemon. Keep systemd details outside core packages.
 
-Linux AMD64 native DEB and RPM packages use shared nFPM definitions under
+Linux AMD64 and ARM64 native DEB and RPM packages use shared nFPM definitions under
 `packaging/linux`. They install `/usr/bin/dscd` and the vendor unit at
 `/usr/lib/systemd/system/dscd.service`, with `/usr/bin/dsc` supplied by Microsoft's
 independent `dsc` package. The declared minimum dependency is `dsc >= 3.3.0`;
 the daemon packages neither bundle DSC nor configure Microsoft repositories.
 Go and packaging tools are build-time requirements only.
+Linux build and inspection scripts select the native architecture by default,
+accepting `ARCH=amd64` or `ARCH=arm64` only when it matches the host. Both execute
+the packaged binary; cross-compilation is not runtime validation. DEB architecture
+names are `amd64`/`arm64`; RPM names are `x86_64`/`aarch64`. Each architecture has
+its own TAR.GZ, DEB, RPM, and checksum list in a separate output directory.
 
 Installation provisions missing `/etc/dsc/config.d` and
 `/var/lib/dsc/results.d` directories as root:root `0700`, without recursively
@@ -841,22 +846,23 @@ creates/moves tags and never automatically publishes a release.
 
 Release calls reusable `ci.yaml` for native source/module/race checks and package
 build/inspection, then reusable `service-integration.yaml` for mandatory
-installation tests. Each platform builds one stamped executable for all its
-formats. Named Actions artifacts carry the final payloads and their SHA-256
+installation tests. Each platform/architecture builds one stamped executable
+for all its formats. Named Actions artifacts carry the final payloads and their SHA-256
 checksums within the invoking workflow run. Integration downloads these exact
 packages, without rebuilding. The draft job downloads the same files, verifies
 the checksums, and combines the platform checksum lists into `SHA256SUMS`.
 There is no custom bundle/manifest format or external artifact store.
 
-Only successful checks permit a draft normal release containing the two
-archives, Windows MSI, DEB/RPM and checksums. Notes identify the version and
+Only successful checks permit a draft normal release containing three
+archives, Windows MSI, both Linux architectures' DEB/RPM packages, and combined
+checksums (eight payloads plus `SHA256SUMS`). Notes identify the version and
 commit. Publication is a manual review step. Retrying builds requires rerunning
 integration; existing releases are not overwritten. See the README for retries.
 Windows packages bundle DSC 3.3.0 and its resources; Linux retains separate
 DSC prerequisites. Stable tags map to native
 Linux version `X.Y.Z`, with RPM release `1`.
 Linux native packages contain the executable, unit and license, not development
-sources. Linux ARM64 packages and package feeds are not part of this release.
+sources. Package feeds and Windows ARM64 packages are out of scope.
 
 ### Windows MSI
 
@@ -1031,15 +1037,18 @@ idle reads and blocked delivery, handle release, malformed notifications, and
 snapshot reads while a producer's rename handle remains open.
 
 Use the build, test, vet, formatting, and race checks specified in
-[AGENTS.md](../AGENTS.md). `ci.yaml` runs these checks natively on Linux and Windows
-for branch pushes and pull requests, and is reused by release runs.
+[AGENTS.md](../AGENTS.md). `ci.yaml` runs these checks natively on Linux
+AMD64/ARM64 and Windows AMD64 for branch pushes and pull requests, and is reused
+by release runs.
 Service tests run separately through `service-integration.yaml` on disposable
 hosted runners: release calls it with uploaded packages, while manual dispatch
 builds its selected ref using a test-only stable version. Both paths download
 named artifacts in the current invoking run and verify checksums before testing.
-The Linux job installs Microsoft's DSC package and exercises native DEB install,
+Each Linux job installs the matching-architecture Microsoft DSC 3.3.0 package,
+verified against its pinned SHA-256, and exercises native DEB install,
 actual Echo reconciliation, stop/start, reinstall, removal and purge with real
-systemd. That job also uses a Fedora container for RPM lifecycle without systemd;
+systemd. ARM64 jobs use `ubuntu-24.04-arm`; AMD64 jobs retain `ubuntu-latest`.
+Each Linux job also uses a native Fedora container for RPM lifecycle without systemd;
 it does not certify RPM service startup.
 Automated upgrade testing and previous-release discovery are deferred. Existing
 scripts retain explicit-package upgrade checks, including running/stopped/
@@ -1077,3 +1086,6 @@ uploaded. Final checksum/asset collection was also exercised against those
 packages without creating a release. Automated upgrades, RPM systemd startup,
 and the end-to-end tag-triggered draft creation remain outside that evidence.
 These historical runs do not validate the bundled-runtime packaging described above.
+They also do not establish ARM64 validation: the native ARM64 build, package
+inspection and service-integration gates require successful runs of the updated
+workflows.

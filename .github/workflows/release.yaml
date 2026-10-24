@@ -83,7 +83,11 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: dscd-linux-amd64
-          path: dist/linux
+          path: dist/linux-amd64
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dscd-linux-arm64
+          path: dist/linux-arm64
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: dscd-windows-amd64
@@ -92,15 +96,18 @@ jobs:
         run: |
           package_version="${VERSION#v}"
           expected=("dscd-$VERSION-linux-amd64.tar.gz" "dscd_${package_version}_amd64.deb"
-                    "dscd-${package_version}-1.x86_64.rpm" "dscd-$VERSION-windows-amd64.zip"
+                    "dscd-${package_version}-1.x86_64.rpm" "dscd-$VERSION-linux-arm64.tar.gz"
+                    "dscd_${package_version}_arm64.deb" "dscd-${package_version}-1.aarch64.rpm"
+                    "dscd-$VERSION-windows-amd64.zip"
                     "dscd-$VERSION-windows-amd64.msi")
           diff <(printf '%s\n' "${expected[@]}" | sort) \
                <(find dist -type f ! -name SHA256SUMS -printf '%f\n' | sort)
-          (cd dist/linux && sha256sum --check --strict SHA256SUMS)
+          (cd dist/linux-amd64 && sha256sum --check --strict SHA256SUMS)
+          (cd dist/linux-arm64 && sha256sum --check --strict SHA256SUMS)
           (cd dist/windows && sha256sum --check --strict SHA256SUMS)
-          cat dist/linux/SHA256SUMS dist/windows/SHA256SUMS > dist/SHA256SUMS
+          cat dist/linux-amd64/SHA256SUMS dist/linux-arm64/SHA256SUMS dist/windows/SHA256SUMS > dist/SHA256SUMS
           diff <(printf '%s\n' "${expected[@]}" | sort) <(cut -c 67- dist/SHA256SUMS | sort)
-          cp dist/linux/*.tar.gz dist/linux/*.deb dist/linux/*.rpm dist/windows/*.zip dist/windows/*.msi dist/
+          cp dist/linux-*/*.tar.gz dist/linux-*/*.deb dist/linux-*/*.rpm dist/windows/*.zip dist/windows/*.msi dist/
       - name: Recheck tag and release
         run: |
           git fetch --no-tags origin "refs/tags/$VERSION"
@@ -117,4 +124,4 @@ jobs:
           (cd dist && sha256sum --check --strict SHA256SUMS)
           gh release create "$VERSION" dist/*.tar.gz dist/*.zip dist/*.msi dist/*.deb dist/*.rpm dist/SHA256SUMS \
             --verify-tag --draft --title "dscd $VERSION" --generate-notes \
-            --notes "Version $VERSION, built from $COMMIT. These exact packages passed fresh-install, reconciliation, service lifecycle and uninstall checks on Windows and Ubuntu, and RPM lifecycle checks in Fedora without systemd. Automated upgrade testing is deferred. Windows MSI and ZIP include Microsoft DSC 3.3.0 and its upstream licenses; Linux requires the separately installed dsc package (3.3.0+). Review this draft before publishing."
+            --notes "Version $VERSION, built from $COMMIT. These exact packages passed fresh-install, reconciliation, service lifecycle and uninstall checks on Windows AMD64 and Ubuntu AMD64/ARM64, and RPM lifecycle checks in Fedora AMD64/ARM64 without systemd. Automated upgrade testing is deferred. Windows MSI and ZIP include Microsoft DSC 3.3.0 and its upstream licenses; Linux requires the separately installed dsc package (3.3.0+). Review this draft before publishing."
