@@ -332,8 +332,10 @@ tests belong only in the reusable/manual service-integration workflow on disposa
 runners. No install-time DSC download, per-user PATH discovery, migration logic or ARM64
 packaging. See [the packaging contract](docs/design.md#windows-msi).
 
-Linux AMD64 DEB/RPM packages share nFPM metadata under `packaging/linux` and the
+Linux AMD64/ARM64 DEB/RPM packages share nFPM metadata under `packaging/linux` and the
 unit in `packaging/systemd`. Pin nFPM in workflows; do not add it to `go.mod`.
+Build and inspect each architecture natively, with separate artifacts and
+checksums; DEB uses `amd64`/`arm64` and RPM uses `x86_64`/`aarch64`.
 Use stable `vX.Y.Z` release tags for package versions. RC tags are unsupported;
 preserve the existing stable MSI mapping rather than renumbering versions.
 Declare Microsoft `dsc >= 3.3.0` as a package dependency; never bundle or download

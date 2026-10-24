@@ -28,8 +28,9 @@ Use the filename for your chosen release in the examples below.
 The native packages register the service, start it, and enable it to run at boot.
 
 #### Linux
-Install Microsoft's `dsc` package first, then install the daemon package using
-the command for your distribution:
+AMD64 and ARM64 packages are available. Install Microsoft's matching-architecture
+`dsc` package first, then install the daemon package using the command for your
+distribution:
 
 ```sh
 # Debian / Ubuntu
@@ -38,6 +39,8 @@ sudo apt install ./dscd_0.0.2_amd64.deb
 # Fedora / RHEL-compatible systems
 sudo dnf install ./dscd-0.0.2.x86_64.rpm
 ```
+
+For ARM64, use the `_arm64.deb` or `.aarch64.rpm` package instead.
 
 #### Windows
 Double-click the downloaded MSI and approve elevation. It installs and starts
@@ -210,8 +213,9 @@ archive and native packages.
 Normal tests use temporary files, fakes and controlled helper executables, not
 DSC. They do not install services or change machine configuration.
 [CI](.github/workflows/ci.yaml) runs module verification and native
-build/test/vet/format/race checks on both OSes for branch pushes and pull requests,
-plus Windows MSI and Linux package build/inspection without installation.
+build/test/vet/format/race checks on Linux AMD64/ARM64 and Windows AMD64 for branch
+pushes and pull requests, plus Windows MSI and Linux package build/inspection
+without installation.
 Release workflows call this same CI before mandatory installation tests.
 To run those tests independently on disposable runners, select
 **Actions > service-integration > Run workflow**, choose a branch, and enter a
@@ -233,8 +237,8 @@ Without that variable, normal tests skip real DSC execution.
 
 ### Build Linux packages
 
-On Linux AMD64, install nFPM **v2.47.0** as a build tool (not a daemon dependency)
-and ensure `dpkg-deb`, `rpm`, `rpm2archive` and `systemd-analyze` are available
+On native Linux AMD64 or ARM64, install nFPM **v2.47.0** as a build tool (not a
+daemon dependency) and ensure `dpkg-deb`, `rpm`, `rpm2archive` and `systemd-analyze` are available
 (Ubuntu's `rpm` package supplies `rpm2archive` via its dependencies):
 
 ```sh
@@ -246,6 +250,10 @@ VERSION=v0.0.3 bash packaging/linux/validate.sh dist
 
 The builder produces TAR.GZ, DEB, RPM and checksums. Validation extracts packages
 without installing them and checks that they contain the archive's executable.
+Both scripts default to the native architecture. An explicit `ARCH=amd64` or
+`ARCH=arm64` must match the host because build and inspection execute the binary;
+cross-compilation alone is not runtime validation. Use separate output directories
+for each architecture, such as `dist/amd64` and `dist/arm64`.
 
 ### Build Windows packages
 
@@ -289,13 +297,15 @@ stable mapping `M.m.(100*p+99)` is unchanged.
 
 Release calls CI for native checks, race tests, and package inspection, then
 calls [service integration](.github/workflows/service-integration.yaml). CI
-builds the release payload once per platform and uploads it with SHA-256
-checksums. Integration downloads those exact files from the invoking release
+builds the release payload once per platform/architecture and uploads it with
+SHA-256 checksums. Integration downloads those exact files from the invoking release
 run; it never rebuilds them. Windows and Ubuntu test fresh installation,
 real DSC Echo reconciliation, service lifecycle and uninstall/data retention.
-Fedora tests RPM lifecycle without systemd, not service startup.
+Linux checks run natively on both AMD64 and ARM64. Fedora containers on each
+architecture test RPM lifecycle without systemd, not service startup.
 Failed checks prevent draft creation. Failure diagnostics are uploaded as
-`windows-install-logs` and `linux-install-logs`.
+`windows-amd64-install-logs`, `linux-amd64-install-logs`, and
+`linux-arm64-install-logs`.
 
 Automated upgrade testing is deferred. Existing scripts still support explicit
 upgrade packages on disposable machines; workflows do not manufacture old
@@ -314,11 +324,14 @@ sudo bash packaging/linux/test-install.sh ./older.deb ./newer.deb
 The Linux test requires separately installed DSC; the Windows test uses the MSI's bundle.
 Installation tests are destructive and disposable-only.
 
-The draft contains (for Linux AMD64 and Windows AMD64):
+The draft contains (for Linux AMD64/ARM64 and Windows AMD64):
 
 - `dscd-v0.0.3-linux-amd64.tar.gz`
 - `dscd_0.0.3_amd64.deb`
 - `dscd-0.0.3-1.x86_64.rpm`
+- `dscd-v0.0.3-linux-arm64.tar.gz`
+- `dscd_0.0.3_arm64.deb`
+- `dscd-0.0.3-1.aarch64.rpm`
 - `dscd-v0.0.3-windows-amd64.zip`
 - `dscd-v0.0.3-windows-amd64.msi` (recommended Windows installation)
 - `SHA256SUMS` covering all release artifacts
@@ -335,7 +348,8 @@ On Windows, use `Get-FileHash -Algorithm SHA256` and compare the archive's
 hash with its entry in `SHA256SUMS`.
 
 After all checks pass, the final job downloads the same artifacts, verifies
-their checksums again, and combines the two checksum lists into `SHA256SUMS`.
+their checksums again, and combines the three platform/architecture checksum lists
+into `SHA256SUMS`.
 It creates a **draft normal release**, not a prerelease. Review its assets,
 version/source commit, workflow results, and documented coverage in **Releases**,
 then publish manually. The workflow never creates/moves a tag or publishes a
@@ -728,10 +742,11 @@ in install scripts, or bundle DSC/resources. Microsoft packages provide
 
 If your configured repository supplies DSC, install it with `sudo apt install dsc`
 or `sudo dnf install dsc`. Otherwise download the corresponding official
-`dsc_3.3.0-1_amd64.deb` or `dsc-3.3.0-1.x86_64.rpm` release asset and install
+`dsc_3.3.0-1_amd64.deb` or `dsc-3.3.0-1.x86_64.rpm` release asset for AMD64,
+or `dsc_3.3.0-1_arm64.deb` or `dsc-3.3.0-1.aarch64.rpm` for ARM64, and install
 it with APT/DNF before installing `dscd`.
 
-Download the matching AMD64 package from GitHub Releases, then:
+Download the package matching your AMD64 or ARM64 host from GitHub Releases, then:
 
 Debian / Ubuntu:
 
@@ -745,7 +760,8 @@ Fedora / RHEL-compatible systems:
 sudo dnf install ./dscd-0.0.3-1.x86_64.rpm
 ```
 
-Use the filenames for your selected version. Installation enables and starts
+The examples above use AMD64; ARM64 filenames end in `_arm64.deb` and
+`.aarch64.rpm`. Use the filenames for your selected version. Installation enables and starts
 `dscd` when systemd is running:
 
 ```sh

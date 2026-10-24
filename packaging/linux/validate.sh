@@ -4,17 +4,28 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 : "${VERSION:?Set VERSION to the tag used to build the packages}"
 [[ $# -eq 1 ]] || { echo "Usage: VERSION=vX.Y.Z bash $0 OUTPUT_DIR" >&2; exit 1; }
+case "$(uname -s):$(uname -m)" in
+    Linux:x86_64) native_arch=amd64 ;;
+    Linux:aarch64) native_arch=arm64 ;;
+    *) echo "Inspection requires native Linux AMD64 or ARM64" >&2; exit 1 ;;
+esac
+ARCH=${ARCH:-$native_arch}
+[[ $ARCH == "$native_arch" ]] || { echo "ARCH must match native architecture $native_arch" >&2; exit 1; }
+case "$ARCH" in
+    amd64) rpm_arch=x86_64 ;;
+    arm64) rpm_arch=aarch64 ;;
+esac
 output=$(realpath "$1")
 version=${VERSION#v}
 [[ $VERSION =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-deb="$output/dscd_${version}_amd64.deb"
-rpm="$output/dscd-${version}-1.x86_64.rpm"
-archive="$output/dscd-$VERSION-linux-amd64.tar.gz"
+deb="$output/dscd_${version}_${ARCH}.deb"
+rpm="$output/dscd-${version}-1.$rpm_arch.rpm"
+archive="$output/dscd-$VERSION-linux-$ARCH.tar.gz"
 [[ $(dpkg-deb -f "$deb" Package) == dscd ]]
 [[ $(dpkg-deb -f "$deb" Version) == "$version" ]]
-[[ $(dpkg-deb -f "$deb" Architecture) == amd64 ]]
+[[ $(dpkg-deb -f "$deb" Architecture) == "$ARCH" ]]
 dpkg-deb -f "$deb" Depends | grep -F 'dsc (>= 3.3.0)'
-[[ $(rpm -qp --qf '%{NAME} %{VERSION} %{RELEASE} %{ARCH}' "$rpm") == "dscd $version 1 x86_64" ]]
+[[ $(rpm -qp --qf '%{NAME} %{VERSION} %{RELEASE} %{ARCH}' "$rpm") == "dscd $version 1 $rpm_arch" ]]
 rpm -qp --requires "$rpm" | grep -Fx 'dsc >= 3.3.0'
 rpm --checksig "$rpm"
 
@@ -22,7 +33,7 @@ stage="$(dirname "$deb")/.verify"
 mkdir "$stage"
 trap 'rm -rf "$stage"' EXIT
 tar -xzf "$archive" -C "$stage"
-archive_root="$stage/dscd-$VERSION-linux-amd64"
+archive_root="$stage/dscd-$VERSION-linux-$ARCH"
 [[ $("$archive_root/bin/dscd" --version) == "dscd $VERSION" ]]
 for file in README.md LICENSE AGENTS.md docs/design.md packaging/systemd/dscd.service; do
     cmp "$file" "$archive_root/$file"

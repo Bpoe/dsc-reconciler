@@ -27,9 +27,16 @@ jobs:
         include:
           - os: ubuntu-latest
             platform: linux
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
           - os: windows-latest
             platform: windows
+            arch: amd64
     runs-on: ${{ matrix.os }}
+    env:
+      ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -40,6 +47,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Validate version mapping
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           .\packaging\windows\msi\version.ps1 -Version $env:RELEASE_VERSION
@@ -66,11 +74,22 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Formatting
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $unformatted = @(gofmt -l .)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ($unformatted.Count -ne 0) { $unformatted; throw 'Run gofmt on the files above.' }
+      - name: Linux formatting
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l .)
+          if [[ -n "$unformatted" ]]; then
+            printf '%s\n' "$unformatted"
+            echo 'Run gofmt on the files above.' >&2
+            exit 1
+          fi
       - name: Race
         run: go test -race ./...
       - name: Build and inspect Windows packages (no installation)
@@ -100,7 +119,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: inputs.commit != ''
         with:
-          name: dscd-${{ matrix.platform }}-amd64
+          name: dscd-${{ matrix.platform }}-${{ matrix.arch }}
           path: ${{ runner.temp }}/dist/*
           if-no-files-found: error
           overwrite: true
