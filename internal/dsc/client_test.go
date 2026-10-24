@@ -16,6 +16,7 @@ import (
 )
 
 const validOutput = `{"metadata":{},"results":[],"messages":[],"hadErrors":false,"future":{"integer":9007199254740993}}`
+const validExportOutput = `{"executionInformation":null,"metadata":null,"result":{"resources":[{"name":"arbitrary","type":"First/Type","properties":{"value":9007199254740993}},{"name":"arbitrary","type":"Other/Type","properties":{}}]},"messages":[],"hadErrors":false,"outputs":{"arbitrary":[null,1]},"future":true}`
 const initializedResult = `{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"1"}}`
 
 func TestMain(m *testing.M) {
@@ -105,12 +106,15 @@ func helperServer() int {
 		}
 		if json.Unmarshal(scanner.Bytes(), &req) != nil || req.JSONRPC != "2.0" || req.ID != lastID+1 ||
 			req.Method != "tools/call" || req.Params.Name != "invoke_dsc_config" ||
-			(req.Params.Arguments.Operation != "set" && req.Params.Arguments.Operation != "test") {
+			!Operation(req.Params.Arguments.Operation).Valid() {
 			return 96
 		}
 		lastID = req.ID
 		mode := req.Params.Arguments.Configuration
 		payload := json.RawMessage(validOutput)
+		if req.Params.Arguments.Operation == "export" {
+			payload = json.RawMessage(validExportOutput)
+		}
 		switch mode {
 		case "test-drift":
 			if req.Params.Arguments.Operation != "test" {
@@ -121,7 +125,13 @@ func helperServer() int {
 			_ = encode.Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": -32602, "message": "private operation diagnostic"}})
 			continue
 		case "dsc-error":
-			payload = json.RawMessage(strings.Replace(validOutput, `"hadErrors":false`, `"hadErrors":true`, 1))
+			payload = json.RawMessage(strings.Replace(string(payload), `"hadErrors":false`, `"hadErrors":true`, 1))
+		case "export-null":
+			payload = json.RawMessage(`{"result":null,"metadata":null,"executionInformation":null,"outputs":null,"messages":[],"hadErrors":false}`)
+		case "export-omitted":
+			payload = json.RawMessage(`{"messages":[],"hadErrors":false}`)
+		case "export-malformed":
+			payload = json.RawMessage(`{"result":[],"messages":[],"hadErrors":false}`)
 		case "tool-error":
 			_ = encode.Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"isError": true, "content": []any{map[string]string{"type": "text", "text": "private tool diagnostic"}}}})
 			continue
@@ -419,7 +429,7 @@ func TestProtocolValidation(t *testing.T) {
 		}
 	}
 	for _, data := range []string{"", "null", "[]", "{}", validOutput + "{}", strings.Replace(validOutput, `"hadErrors":false`, `"hadErrors":null`, 1)} {
-		if _, _, err := parseOutput([]byte(data)); err == nil {
+		if _, _, err := parseOutput([]byte(data), OperationSet); err == nil {
 			t.Errorf("accepted DSC result %q", data)
 		}
 	}
@@ -473,7 +483,7 @@ func TestFrameLimitsAndToolShapes(t *testing.T) {
 		}
 	}
 	for _, raw := range []string{`{}`, `{"structuredContent":null}`, `{"structuredContent":[]}`, `{"isError":null}`, `{"isError":"false"}`} {
-		if _, _, _, err := parseToolResult(json.RawMessage(raw)); err == nil {
+		if _, _, _, err := parseToolResult(json.RawMessage(raw), OperationSet); err == nil {
 			t.Errorf("accepted malformed tool result %s", raw)
 		}
 	}
@@ -482,7 +492,7 @@ func TestFrameLimitsAndToolShapes(t *testing.T) {
 func TestSessionMixedOperationsAndDrift(t *testing.T) {
 	client, _ := helperClient(t)
 	s := startSession(t, client, context.Background())
-	for _, operation := range []Operation{OperationSet, OperationTest, OperationSet} {
+	for _, operation := range []Operation{OperationSet, OperationTest, OperationExport, OperationSet} {
 		in := Input{Configuration: "a.yaml", Operation: operation, ConfigurationText: "success"}
 		if operation == OperationTest {
 			in.ConfigurationText = "test-drift"
@@ -494,6 +504,75 @@ func TestSessionMixedOperationsAndDrift(t *testing.T) {
 		}
 		if operation == OperationTest && !strings.Contains(string(r.DSCResult), `"inDesiredState":false`) {
 			t.Fatal("lost desired-state information")
+		}
+		if operation == OperationExport && string(r.DSCResult) != validExportOutput {
+			t.Fatal("lost export payload")
+		}
+	}
+}
+
+func TestExportSessionResponsesAndParameters(t *testing.T) {
+	client, _ := helperClient(t)
+	s := startSession(t, client, context.Background())
+	for _, mode := range []string{"success", "inline", "empty-sidecar", "dsc-error", "rpc-error", "tool-error", "export-null", "export-omitted", "success"} {
+		in := Input{Configuration: "inventory.yaml", Operation: OperationExport, ConfigurationText: mode}
+		if mode == "inline" || mode == "empty-sidecar" {
+			in.Parameters = "inventory.parameters.json"
+			if mode == "inline" {
+				in.ParametersText = "message: exact text\n"
+			}
+		}
+		r, err := s.Execute(context.Background(), in)
+		failed := mode == "dsc-error" || mode == "rpc-error" || mode == "tool-error"
+		if err != nil || (r.Error != nil) != failed || r.Operation == nil || *r.Operation != OperationExport ||
+			r.SchemaVersion != 1 || r.ExitCode != nil || r.Stderr != "" {
+			t.Fatalf("%s: %+v (%v)", mode, r, err)
+		}
+		if failed && (r.Outcome != "failed" || r.Error.Kind != "dsc") {
+			t.Fatalf("export error: %+v", r)
+		}
+		if mode == "success" && string(r.DSCResult) != validExportOutput ||
+			mode == "dsc-error" && string(r.DSCResult) != strings.Replace(validExportOutput, `"hadErrors":false`, `"hadErrors":true`, 1) {
+			t.Fatal("export response not preserved")
+		}
+	}
+	r, err := s.Execute(context.Background(), Input{Configuration: "inventory.yaml", Operation: OperationExport, ConfigurationText: "export-malformed"})
+	if err == nil || r.Error == nil || r.Error.Kind != "output" || !s.closed || r.DSCResult != nil {
+		t.Fatalf("malformed export response: %+v (%v)", r, err)
+	}
+}
+
+func TestOperationAwareOutputValidation(t *testing.T) {
+	for _, operation := range []Operation{OperationSet, OperationTest, OperationExport} {
+		valid := []string{validOutput}
+		if operation == OperationExport {
+			valid = []string{validExportOutput, `{"messages":[],"hadErrors":false}`, `{"result":null,"metadata":null,"outputs":null,"executionInformation":null,"messages":[],"hadErrors":false}`}
+		}
+		for _, raw := range valid {
+			payload, hadErrors, err := parseOutput([]byte(raw), operation)
+			if err != nil || hadErrors || string(payload) != raw {
+				t.Fatalf("%s rejected valid output %s: %v", operation, raw, err)
+			}
+		}
+		invalid := []string{
+			`null`, `[]`, `{}`, `{"result":{},"messages":null,"hadErrors":false}`,
+			`{"result":{},"messages":[]}`, `{"result":{},"messages":[],"hadErrors":null}`,
+			`{"result":{},"messages":[],"hadErrors":"false"}`,
+		}
+		if operation == OperationExport {
+			for _, field := range []string{"result", "metadata", "outputs", "executionInformation"} {
+				for _, value := range []string{`[]`, `42`, `"object"`, `true`} {
+					invalid = append(invalid, fmt.Sprintf(`{%q:%s,"messages":[],"hadErrors":false}`, field, value))
+				}
+			}
+		} else {
+			invalid = append(invalid, validExportOutput, `{"metadata":null,"results":[],"messages":[],"hadErrors":false}`,
+				`{"metadata":{},"results":null,"messages":[],"hadErrors":false}`)
+		}
+		for _, raw := range invalid {
+			if _, _, err := parseOutput([]byte(raw), operation); err == nil {
+				t.Errorf("%s accepted malformed output %s", operation, raw)
+			}
 		}
 	}
 }

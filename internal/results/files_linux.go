@@ -33,6 +33,8 @@ func makeDirectory(path string) error {
 
 func protectFile(string) error { return nil } // CreateTemp uses 0600.
 
+func openResultFile(path string) (*os.File, error) { return os.Open(path) }
+
 func validateDestination(name, path string) error {
 	if len(name) > 255 {
 		return fmt.Errorf("result basename exceeds 255 bytes: %q", name)

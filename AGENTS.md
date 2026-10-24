@@ -98,8 +98,9 @@ basenames, and never reconcile sidecars independently. Read each input once,
 hash the captured UTF-8 strings and effective operation using the documented
 `dscd-input-v2` framing, and submit exactly those strings and operation to DSC.
 Hash the original document, including all metadata bytes, and the normalized
-`set`/`test` operation. Formatting and ignored-property edits change the submitted
-input identity, not the operation. The hash is not a skip key.
+`set`/`test`/`export` operation. Formatting and ignored-property edits change the submitted
+input identity, not the operation. Periodic frequency checks use the hash alongside
+the latest result's operation and `finishedAt`; filesystem triggers never hash-skip.
 Discover recursively, skipping dot-prefixed entries and directory symlinks.
 Pair and reject ambiguous basenames only within the same directory. Use
 slash-normalized relative paths for identities and mirror those paths under
@@ -121,11 +122,13 @@ Use `go.yaml.in/yaml/v3` nodes for YAML and `encoding/json` raw messages for JSO
 to extract metadata without modeling DSC resources. Never strip or reserialize inputs.
 
 Optional `metadata.dscd` in each configuration is owned by `dscd` and extracted
-under `internal/reconcile`. Only `operation` has behavior today: exactly `set` or
-`test`. Missing metadata, missing `dscd`, empty objects, or an omitted operation
+under `internal/reconcile`. Parse `operation` and `frequency` together. Operation
+is exactly `set`, `test` or `export`; do not add `get`. Missing metadata, missing `dscd`, empty objects, or an omitted operation
 defaults to `set`. Ignore unknown properties at every level, including arbitrary
 nested values. Validate known containers and operation values. Resolve YAML
 aliases and merges along the metadata path rather than silently enforcing `set`.
+Frequency is a positive Go duration string, defaulting to 15m for set/test and
+24h for export; reject invalid values without falling back to defaults.
 Keep `.yaml` and `.json` configuration discovery; `.yml` remains ignored.
 
 For example, `web.yaml` and `web.parameters.yaml` form one input. To make it
@@ -135,6 +138,7 @@ audit-only, the configuration includes:
 metadata:
   dscd:
     operation: test
+    frequency: 30m
 ```
 
 The companion `.dscd.json` mechanism is removed. Those files now follow ordinary
@@ -143,12 +147,21 @@ The companion `.dscd.json` mechanism is removed. Those files now follow ordinary
 **No embedded operation means `set`: placing a configuration in the directory normally
 authorizes DSC to enforce that desired state.** Producers must publish audit-only
 metadata in the configuration itself. Malformed/unreadable input or an invalid
-explicit operation fails only that configuration, publishes an `input` failure
+explicit operation or frequency fails only that configuration, publishes an `input` failure
 without invoking DSC, and does not block later configurations. Never fall back to
 `set` for invalid metadata or log arbitrary metadata contents.
 Persist the effective `operation`, including default `set`, in every result.
 Use null when input failures prevent resolving the operation; do not claim that
 an operation was submitted for an invalid configuration.
+
+Use existing full passes for frequency checks after protected snapshot capture.
+The latest result file is the only scheduling checkpoint: execute for missing,
+unreadable or unusable results, operation/hash changes, or elapsed frequency since
+`finishedAt`. Failed attempts count too; invalid/future timestamps never suppress
+execution. Startup discovers immediately but skips fresh matching results.
+Skipped inputs neither start DSC nor replace results. Filesystem-triggered work
+bypasses frequency and publishes a new checkpoint. Do not add per-document timers,
+state files, databases or restart-dependent in-memory execution history.
 
 Start one short-lived `dsc server` per nonempty executable pass, initialize MCP
 and submit configurations sequentially with `invoke_dsc_config`, using each
@@ -160,6 +173,10 @@ server/protocol failure or request timeout; ordinary DSC errors retain the sessi
 Do not keep DSC alive between passes, introduce an MCP SDK, or interpret resource
 state. Server sidecars are direct parameter mappings, not CLI-wrapped envelopes;
 the daemon passes them unchanged.
+Export uses DSC 3.3.0's `ConfigurationExportResult`: optional/null singular `result`,
+metadata/execution/output objects, required messages and boolean `hadErrors`.
+Keep set/test validation unchanged and preserve the complete export payload in the
+standard schema-version-1 result. No inventory subsystem or export-specific writer.
 
 Filesystem watching is a low-latency optimization, not the correctness mechanism.
 Use the same discovery and single-candidate execution path for targeted and full
@@ -257,6 +274,8 @@ Prioritize observable behavior:
 - Continued processing after a document failure and publication of failure results.
 - Embedded metadata extraction/defaults/validation, mixed operations within a session,
   operation-aware hashes, persisted operation, and successful tests reporting drift.
+- Export optional/null envelope fields and raw payload preservation; persisted-result
+  frequency/defaults, restart skips, failed attempts, due boundaries and forced targeted work.
 - Immediate first reconciliation, a full interval after each completed full pass,
   targeted work without postponing full passes, no catch-up or overlapping passes,
   and prompt cancellation during the wait.

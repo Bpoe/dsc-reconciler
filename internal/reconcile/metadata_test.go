@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -70,9 +71,9 @@ resources:
 	} {
 		for ext, text := range map[string]string{".json": test.json, ".yaml": test.yaml, ".json.yaml": test.json} {
 			t.Run(test.name+ext, func(t *testing.T) {
-				got, err := configurationOperation("web"+ext, text)
-				if err != nil || got != test.want {
-					t.Fatalf("operation = %q (%v), want %q", got, err, test.want)
+				got, err := configurationMetadata("web"+ext, text)
+				if err != nil || got.operation != test.want || got.frequency != 15*time.Minute {
+					t.Fatalf("metadata = %+v (%v), want %q/15m", got, err, test.want)
 				}
 			})
 		}
@@ -89,11 +90,63 @@ func TestYAMLMetadataAliasesAndMerges(t *testing.T) {
 		"policy: &policy test\nmetadata: {dscd: {operation: *policy}}\n",
 	} {
 		t.Run(text, func(t *testing.T) {
-			op, err := configurationOperation("web.yaml", text)
-			if err != nil || op != dsc.OperationTest {
-				t.Fatalf("YAML policy ignored: %q (%v)", op, err)
+			options, err := configurationMetadata("web.yaml", text)
+			if err != nil || options.operation != dsc.OperationTest {
+				t.Fatalf("YAML policy ignored: %+v (%v)", options, err)
 			}
 		})
+	}
+}
+
+func TestConfigurationFrequency(t *testing.T) {
+	for _, operation := range []dsc.Operation{dsc.OperationSet, dsc.OperationTest, dsc.OperationExport} {
+		for _, explicit := range []bool{false, true} {
+			t.Run(string(operation)+"/explicit="+fmt.Sprint(explicit), func(t *testing.T) {
+				want := 15 * time.Minute
+				if operation == dsc.OperationExport {
+					want = 24 * time.Hour
+				}
+				jsonPolicy := fmt.Sprintf(`{"operation":%q}`, operation)
+				yamlPolicy := fmt.Sprintf("{operation: %s}", operation)
+				if explicit {
+					want = 90 * time.Minute
+					jsonPolicy = fmt.Sprintf(`{"operation":%q,"frequency":"1h30m"}`, operation)
+					yamlPolicy = fmt.Sprintf("{operation: %s, frequency: 1h30m}", operation)
+				}
+				for name, text := range map[string]string{
+					"web.json":      `{"metadata":{"dscd":` + jsonPolicy + `}}`,
+					"web.yaml":      "metadata: {dscd: " + yamlPolicy + "}\n",
+					"web.json.yaml": `{"metadata":{"dscd":` + jsonPolicy + `}}`,
+				} {
+					got, err := configurationMetadata(name, text)
+					if err != nil || got.operation != operation || got.frequency != want {
+						t.Fatalf("%s: metadata=%+v (%v), want %s/%s", name, got, err, operation, want)
+					}
+				}
+			})
+		}
+	}
+	for name, text := range map[string]string{
+		"web.json": `{"metadata":{"dscd":{"frequency":"5m","Frequency":null,"future":{"nested":[null,false]}}}}`,
+		"web.yaml": "metadata: {dscd: {frequency: 5m, Frequency: null, future: {nested: [null, false]}}}\n",
+	} {
+		got, err := configurationMetadata(name, text)
+		if err != nil || got.operation != dsc.OperationSet || got.frequency != 5*time.Minute {
+			t.Fatalf("frequency without operation: %+v (%v)", got, err)
+		}
+	}
+	for _, text := range []string{
+		"policy: &policy {operation: export, frequency: 12h}\nmetadata: {dscd: *policy}\n",
+		"policy: &policy {operation: export, frequency: 12h}\nmetadata: {dscd: {<<: *policy}}\n",
+		"policy: &policy {operation: set, frequency: 24h}\nmetadata: {dscd: {<<: *policy, operation: export, frequency: 12h}}\n",
+		"policy: &policy {dscd: {operation: export, frequency: 12h}}\nmetadata: {<<: [*policy]}\n",
+		"policy: &policy {metadata: {dscd: {operation: export, frequency: 12h}}}\n<<: *policy\n",
+		"duration: &duration 12h\nmetadata: {dscd: {operation: export, frequency: *duration}}\n",
+	} {
+		got, err := configurationMetadata("web.yaml", text)
+		if err != nil || got.operation != dsc.OperationExport || got.frequency != 12*time.Hour {
+			t.Fatalf("YAML frequency ignored: %+v (%v), %s", got, err, text)
+		}
 	}
 }
 
@@ -221,6 +274,7 @@ func TestInvalidEmbeddedMetadataFailsOnlyConfiguration(t *testing.T) {
 		`{"metadata":null}`, `{"metadata":[]}`, `{"metadata":"PRIVATE-METADATA"}`,
 		`{"metadata":{"dscd":null}}`, `{"metadata":{"dscd":[]}}`, `{"metadata":{"dscd":true}}`,
 		`{"metadata":{"dscd":{"operation":"apply"}}}`,
+		`{"metadata":{"dscd":{"operation":"get"}}}`,
 		`{"metadata":{"dscd":{"operation":"PRIVATE-METADATA"}}}`,
 		`{"metadata":{"dscd":{"operation":""}}}`,
 		`{"metadata":{"dscd":{"operation":null}}}`,
@@ -232,6 +286,19 @@ func TestInvalidEmbeddedMetadataFailsOnlyConfiguration(t *testing.T) {
 		`{"metadata":{"dscd":{"operation":" test "}}}`,
 		`{"metadata":{"dscd":{"operation":null,"Operation":"test"}}}`,
 		`{"metadata":{"dscd":{"operation":"test","operation":"set"}}}`,
+		`{"metadata":{"dscd":{"frequency":"0s"}}}`,
+		`{"metadata":{"dscd":{"frequency":"-1h"}}}`,
+		`{"metadata":{"dscd":{"frequency":"PRIVATE-METADATA"}}}`,
+		`{"metadata":{"dscd":{"frequency":"1d"}}}`,
+		`{"metadata":{"dscd":{"frequency":"999999999999999h"}}}`,
+		`{"metadata":{"dscd":{"frequency":""}}}`,
+		`{"metadata":{"dscd":{"frequency":null}}}`,
+		`{"metadata":{"dscd":{"frequency":false}}}`,
+		`{"metadata":{"dscd":{"frequency":300}}}`,
+		`{"metadata":{"dscd":{"frequency":[]}}}`,
+		`{"metadata":{"dscd":{"frequency":{}}}}`,
+		`{"metadata":{"dscd":{"frequency":"1h","frequency":"2h"}}}`,
+		`{"metadata":{"dscd":{"operation":"export","frequency":null}}}`,
 		`{"metadata":{"dscd":{"operation":"test"},"dscd":{}}}`,
 		`{"metadata":{"dscd":{"operation":"test"}},"metadata":{}}`,
 		"{\"metadata\":\"\xff\"}",
@@ -253,6 +320,15 @@ func TestInvalidEmbeddedMetadataFailsOnlyConfiguration(t *testing.T) {
 		"metadata:\n  dscd:\n    operation: Test\n", "metadata:\n  dscd:\n    operation: ' test '\n",
 		"metadata:\n  dscd:\n    operation: test\n    operation: set\n",
 		"metadata:\n  dscd:\n    operation: !!binary dGVzdA==\n",
+		"metadata: {dscd: {frequency: }}\n",
+		"metadata: {dscd: {frequency: true}}\n",
+		"metadata: {dscd: {frequency: 15}}\n",
+		"metadata: {dscd: {frequency: [15m]}}\n",
+		"metadata: {dscd: {frequency: '0'}}\n",
+		"metadata: {dscd: {frequency: -5m}}\n",
+		"metadata: {dscd: {frequency: !!binary MTVo}}\n",
+		"metadata: {dscd: {frequency: 1h, frequency: 2h}}\n",
+		"policy: &policy {frequency: null}\nmetadata: {dscd: {<<: *policy}}\n",
 		"metadata: &loop {<<: *loop}\n",
 	} {
 		t.Run(text, func(t *testing.T) {
@@ -334,10 +410,14 @@ func TestEmbeddedMetadataSharesInputSizeLimit(t *testing.T) {
 
 func TestOperationHashWithoutParameters(t *testing.T) {
 	in := dsc.Input{ConfigurationText: "opaque input", Operation: dsc.OperationSet}
-	setHash := inputHash(in)
-	in.Operation = dsc.OperationTest
-	if inputHash(in) == setHash {
-		t.Fatal("operation ignored for inputs without parameters")
+	seen := make(map[string]bool)
+	for _, operation := range []dsc.Operation{dsc.OperationSet, dsc.OperationTest, dsc.OperationExport} {
+		in.Operation = operation
+		hash := inputHash(in)
+		if seen[hash] {
+			t.Fatal("operation ignored for inputs without parameters")
+		}
+		seen[hash] = true
 	}
 }
 

@@ -30,6 +30,7 @@ func (f fakeDSC) start(context.Context) (DSC, error) { return f, nil }
 type fakeWriter struct {
 	mu      sync.Mutex
 	results []dsc.Result
+	read    func(context.Context, string) (dsc.Result, error)
 	write   func(context.Context, dsc.Result) error
 }
 
@@ -38,6 +39,13 @@ func (w *fakeWriter) Destination(name string) (string, error) {
 		return "", errors.New("name too long")
 	}
 	return name + ".result.json", nil
+}
+
+func (w *fakeWriter) Read(ctx context.Context, name string) (dsc.Result, error) {
+	if w.read != nil {
+		return w.read(ctx, name)
+	}
+	return dsc.Result{}, os.ErrNotExist
 }
 
 func (w *fakeWriter) Write(ctx context.Context, result dsc.Result) error {
